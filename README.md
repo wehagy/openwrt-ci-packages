@@ -228,9 +228,11 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
   of the current version hashes to the `PKG_HASH` already in the Makefile, and
   the SDK build checks the new hash again when it downloads the archive.
 - Go module vendoring is not in the Makefile: nothing else changes.
-- The base is called at `@feat/feed-source` with `ci_ref: feat/feed-source`,
-  because `feed_repository` and `feed_ref` are not in the base `main` yet. Both
-  switch to `@main` and `ci_ref: main` when that branch is integrated.
+- The base is called at `@main` with `ci_ref: main`. The commit it reports
+  having built (`feed_sha` output of `build.yml`) is what the description shows,
+  and `publish` refuses to open a pull request if line `main` built another
+  commit than the bump commit. The review repository must be public (the base
+  checks the feed out with the `github.token` of this repository).
 
 ## Secrets
 

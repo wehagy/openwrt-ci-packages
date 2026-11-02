@@ -20,9 +20,8 @@
 # publish only. The build, test and image jobs get no secrets (no `secrets:`
 # and no test_secrets), so the token never reaches the QEMU tests.
 #
-# The workflows and the scripts of the base come from the branch feat/feed-source
-# for now (`@feat/feed-source` and ci_ref); both switch to main when that branch
-# is integrated.
+# The workflows and the scripts of the base both come from its main (`@main` and
+# ci_ref: main; ci_ref defaults to main, it is kept explicit to match `@main`).
 name: update
 
 on:
@@ -201,9 +200,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.detect.outputs.package }}
       feed_repository: ${{ needs.detect.outputs.review_repository }}
@@ -214,9 +213,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: main
       package: ${{ needs.detect.outputs.package }}
       feed_repository: ${{ needs.detect.outputs.review_repository }}
@@ -228,9 +227,9 @@ jobs:
   # (README.md, "Runtime tests") are not part of this workflow.
   test-25-12:
     needs: [detect, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.detect.outputs.package }}
       source: artifact
@@ -238,9 +237,9 @@ jobs:
 
   test-main:
     needs: [detect, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: main
       package: ${{ needs.detect.outputs.package }}
       source: artifact
@@ -248,17 +247,17 @@ jobs:
 
   image-25-12:
     needs: [detect, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.detect.outputs.package }}
 
   image-main:
     needs: [detect, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: main
       package: ${{ needs.detect.outputs.package }}
 
@@ -329,8 +328,11 @@ jobs:
           REVIEW_IS_FORK: ${{ needs.detect.outputs.review_is_fork }}
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.sha }}
+          FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
+          FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
         run: |
           python3 -B scripts/report.py \
+            --feed-sha-main "${FEED_SHA_MAIN}" --feed-sha-25-12 "${FEED_SHA_25_12}" \
             --package "${PACKAGE}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
             --upstream-repository "${UPSTREAM_REPOSITORY}" \
             --review-repository "${REVIEW_REPOSITORY}" --review-is-fork "${REVIEW_IS_FORK}" \
@@ -341,7 +343,8 @@ jobs:
           cat body.md >>"${GITHUB_STEP_SUMMARY}"
 
       # Both views must agree: the result of the three jobs of line main as
-      # GitHub reports it, and the job list the description was built from.
+      # GitHub reports it, and the job list the description was built from. The
+      # commit the base reports having built (feed_sha) must be the bump commit.
       - name: Decide
         id: decide
         env:
@@ -349,7 +352,13 @@ jobs:
           TEST: ${{ needs.test-main.result }}
           IMAGE: ${{ needs.image-main.result }}
           REPORT_PASSED: ${{ steps.report.outputs.main_passed }}
+          FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.sha }}
         run: |
+          if [ "${BUILD}" = success ] && [ "${FEED_SHA_MAIN}" != "${HEAD_SHA}" ]; then
+            echo "::error::line main built ${FEED_SHA_MAIN}, not the bump commit ${HEAD_SHA}"
+            exit 1
+          fi
           if [ "${BUILD}" = success ] && [ "${TEST}" = success ] && [ "${IMAGE}" = success ] && [ "${REPORT_PASSED}" = true ]; then
             open=true
           else

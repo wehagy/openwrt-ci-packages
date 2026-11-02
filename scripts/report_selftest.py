@@ -68,6 +68,8 @@ def args_for(**extra: str) -> argparse.Namespace:
         "update_branch": "ci/netbird-update-0.82.0",
         "base_sha": "a" * 40,
         "head_sha": "b" * 40,
+        "feed_sha_main": "b" * 40,
+        "feed_sha_25_12": "c" * 40,
         "run_url": "https://example.invalid/runs/1",
     }
     values.update(extra)
@@ -97,6 +99,8 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(report.line_passed(jobs, "25.12"))
         self.assertIn("| `main` passed | passed (3/3) | passed (2/2) |", body)
         self.assertIn("passed (2/2): 1 too big as expected |", body)
+        self.assertIn("| Built (line `main`) | wehagy/w @ `" + "b" * 40 + "` |", body)
+        self.assertIn("| Built (line `25.12`) | wehagy/w @ `" + "c" * 40 + "` |", body)
 
     def test_image_outcomes(self) -> None:
         body, _ = self.body()

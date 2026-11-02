@@ -165,7 +165,8 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
     out.append(
         f"| Starting point | `{args.base_branch}` @ `{args.base_sha}` |\n"
         f"| Bump commit | `{args.update_branch}` @ `{args.head_sha}` |\n"
-        f"| Tree built and tested | {args.review_repository} @ `{args.head_sha}` |\n"
+        f"| Built (line `main`) | {args.review_repository} @ `{args.feed_sha_main}` |\n"
+        f"| Built (line `25.12`) | {args.review_repository} @ `{args.feed_sha_25_12}` |\n"
     )
     out.append("## Results\n")
     out.append("| Line | Build (SDK) | QEMU test | Images |\n|---|---|---|---|")
@@ -227,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
         "update-branch",
         "base-sha",
         "head-sha",
+        "feed-sha-main",
+        "feed-sha-25-12",
         "run-url",
         "jobs",
         "artifacts",
