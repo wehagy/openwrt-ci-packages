@@ -149,5 +149,8 @@ class RefPeer:
 
     def stop(self):
         """`netbird down` (leave the network cleanly), then remove the container."""
-        self._docker("exec", self.name, "netbird", "down", timeout=60)
-        self._docker("rm", "-f", self.name, timeout=60)
+        try:
+            self._docker("exec", self.name, "netbird", "down", timeout=60)
+        finally:
+            # A hung `netbird down` (TimeoutExpired) must not leak the container.
+            self._docker("rm", "-f", self.name, timeout=60)
