@@ -1,0 +1,379 @@
+# A new upstream NetBird release becomes a DRAFT pull request for manual review.
+#
+# Every day (and on request) it compares the latest release of netbirdio/netbird
+# with PKG_VERSION in the review repository (packages/netbird/config.yml,
+# review_repository). When the release is newer and no branch or pull request
+# for it exists there:
+#   1. prepare: commit "netbird: update to X.Y.Z" on the review branch and push
+#      two branches to the review repository, base (the starting commit) and
+#      update (the commit), so that a pull request between them shows only the
+#      bump;
+#   2. build, QEMU-test and build images of the update branch on both lines,
+#      through the reusable base wehagy/openwrt-ci (feed_repository/feed_ref);
+#   3. publish: when line main passed (line 25.12 may fail), open a draft pull
+#      request between the two branches with the results of both lines and the
+#      link that opens the upstream pull request by hand; otherwise delete both
+#      branches. CI never writes to openwrt/packages.
+#
+# The secret TEST_UPSTREAM_TOKEN (fine-grained token, only the review
+# repository, Contents and Pull requests: write) is read by the jobs prepare and
+# publish only. The build, test and image jobs get no secrets (no `secrets:`
+# and no test_secrets), so the token never reaches the QEMU tests.
+#
+# The workflows and the scripts of the base come from the branch feat/feed-source
+# for now (`@feat/feed-source` and ci_ref); both switch to main when that branch
+# is integrated.
+name: update
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Bump to this version (X.Y.Z) instead of the latest release
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  COMMIT_NAME: Wesley Gimenes
+  COMMIT_EMAIL: wehagy@proton.me
+
+jobs:
+  # Reads the one configuration file, validates it, runs the self-tests of the
+  # scripts and decides whether there is anything to do. Read only.
+  detect:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      package: ${{ steps.config.outputs.package }}
+      package_path: ${{ steps.config.outputs.package_path }}
+      upstream_repository: ${{ steps.config.outputs.upstream_repository }}
+      review_repository: ${{ steps.config.outputs.review_repository }}
+      review_branch: ${{ steps.config.outputs.review_branch }}
+      needed: ${{ steps.plan.outputs.needed }}
+      current: ${{ steps.plan.outputs.current }}
+      target: ${{ steps.plan.outputs.target }}
+      update_branch: ${{ steps.plan.outputs.update_branch }}
+      base_branch: ${{ steps.plan.outputs.base_branch }}
+      review_is_fork: ${{ steps.fork.outputs.review_is_fork }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the scripts
+        run: |
+          scripts/update-selftest.sh
+          python3 -B scripts/report_selftest.py
+
+      # review_repository is validated here: the owner openwrt is refused.
+      - name: Read and validate packages/netbird/config.yml
+        id: config
+        run: scripts/check-config.sh packages/netbird/config.yml | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Plan the update
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_REPOSITORY: ${{ steps.config.outputs.upstream_repository }}
+          REVIEW_REPOSITORY: ${{ steps.config.outputs.review_repository }}
+          REVIEW_BRANCH: ${{ steps.config.outputs.review_branch }}
+          PACKAGE: ${{ steps.config.outputs.package }}
+          PACKAGE_PATH: ${{ steps.config.outputs.package_path }}
+          FORCE_VERSION: ${{ inputs.version }}
+        run: scripts/plan-update.sh | tee -a "${GITHUB_OUTPUT}"
+
+      # A fork gets the working upstream link; a copy that is not a fork (the
+      # test repository) gets a note that the link does not work.
+      - name: Is the review repository a fork
+        id: fork
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPOSITORY: ${{ steps.config.outputs.review_repository }}
+        run: |
+          fork=$(gh api "repos/${REVIEW_REPOSITORY}" --jq .fork)
+          case "${fork}" in true | false) ;; *) echo "::error::cannot tell if the review repository is a fork"; exit 1 ;; esac
+          echo "review_is_fork=${fork}" | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Summary
+        env:
+          NEEDED: ${{ steps.plan.outputs.needed }}
+          REASON: ${{ steps.plan.outputs.reason }}
+          REVIEW_REPOSITORY: ${{ steps.config.outputs.review_repository }}
+        run: |
+          {
+            echo "### Update plan"
+            echo
+            echo "- review repository: \`${REVIEW_REPOSITORY}\`"
+            echo "- update needed: \`${NEEDED}\`"
+            echo "- ${REASON}"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  # The first job with the token: commit the bump and push the two branches. It
+  # runs before the build because the base builds a commit of the review
+  # repository (feed_ref), which must exist there. It fails before any build if
+  # the secret is missing.
+  prepare:
+    needs: detect
+    if: ${{ needs.detect.outputs.needed == 'true' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      base_sha: ${{ steps.branches.outputs.base_sha }}
+      sha: ${{ steps.branches.outputs.sha }}
+    env:
+      REVIEW_REPOSITORY: ${{ needs.detect.outputs.review_repository }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the configuration and the token
+        env:
+          TEST_UPSTREAM_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+          GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+        run: |
+          configured=$(scripts/check-config.sh packages/netbird/config.yml | grep '^review_repository=')
+          if [ "${configured}" != "review_repository=${REVIEW_REPOSITORY}" ]; then
+            echo "::error::review_repository changed since the detect job"
+            exit 1
+          fi
+          if [ -z "${TEST_UPSTREAM_TOKEN}" ]; then
+            echo "::error::the secret TEST_UPSTREAM_TOKEN is not set in this repository: create a fine-grained token (owner wehagy, only the review repository, Contents and Pull requests: read and write) and store it as that secret"
+            exit 1
+          fi
+          push=$(gh api "repos/${REVIEW_REPOSITORY}" --jq .permissions.push)
+          if [ "${push}" != true ]; then
+            echo "::error::TEST_UPSTREAM_TOKEN cannot push to ${REVIEW_REPOSITORY}"
+            exit 1
+          fi
+          echo "TEST_UPSTREAM_TOKEN is set and can push to ${REVIEW_REPOSITORY}"
+
+      - name: Check out the review repository
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: ${{ needs.detect.outputs.review_repository }}
+          ref: ${{ needs.detect.outputs.review_branch }}
+          token: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+          path: review
+
+      - name: Commit the bump and push the two branches
+        id: branches
+        env:
+          REVIEW_DIR: review
+          PACKAGE: ${{ needs.detect.outputs.package }}
+          PACKAGE_PATH: ${{ needs.detect.outputs.package_path }}
+          UPSTREAM_REPOSITORY: ${{ needs.detect.outputs.upstream_repository }}
+          TARGET_VERSION: ${{ needs.detect.outputs.target }}
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+          UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+        run: scripts/prepare-branches.sh | tee -a "${GITHUB_OUTPUT}"
+
+      - name: Summary
+        env:
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+          UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+          BASE_SHA: ${{ steps.branches.outputs.base_sha }}
+          SHA: ${{ steps.branches.outputs.sha }}
+        run: |
+          {
+            echo "### Branches pushed to \`${REVIEW_REPOSITORY}\`"
+            echo
+            echo "- base: \`${BASE_BRANCH}\` @ \`${BASE_SHA}\`"
+            echo "- update: \`${UPDATE_BRANCH}\` @ \`${SHA}\`"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
+  # packages: write (see README.md). feed_ref is the commit of the update
+  # branch, so every architecture and both lines build the same tree.
+  build-25-12:
+    needs: [detect, prepare]
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: "25.12"
+      package: ${{ needs.detect.outputs.package }}
+      feed_repository: ${{ needs.detect.outputs.review_repository }}
+      feed_ref: ${{ needs.prepare.outputs.sha }}
+
+  build-main:
+    needs: [detect, prepare]
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: main
+      package: ${{ needs.detect.outputs.package }}
+      feed_repository: ${{ needs.detect.outputs.review_repository }}
+      feed_ref: ${{ needs.prepare.outputs.sha }}
+
+  # tests_path: a missing directory means only the generic test runs. No
+  # `secrets:` and no test_secrets: nothing of this repository, least of all
+  # TEST_UPSTREAM_TOKEN, reaches the tests. The tests that need NB_SETUP_KEY
+  # (README.md, "Runtime tests") are not part of this workflow.
+  test-25-12:
+    needs: [detect, build-25-12]
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: "25.12"
+      package: ${{ needs.detect.outputs.package }}
+      source: artifact
+      tests_path: packages/${{ needs.detect.outputs.package }}/tests
+
+  test-main:
+    needs: [detect, build-main]
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: main
+      package: ${{ needs.detect.outputs.package }}
+      source: artifact
+      tests_path: packages/${{ needs.detect.outputs.package }}/tests
+
+  image-25-12:
+    needs: [detect, build-25-12]
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: "25.12"
+      package: ${{ needs.detect.outputs.package }}
+
+  image-main:
+    needs: [detect, build-main]
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    with:
+      ci_ref: feat/feed-source
+      line: main
+      package: ${{ needs.detect.outputs.package }}
+
+  # The second job with the token. Line main passed (build, QEMU test and
+  # images all green): open the draft pull request, with line 25.12 reported
+  # whatever its result. Otherwise: delete the two branches, no pull request.
+  # actions: read lets the GITHUB_TOKEN list the jobs and artifacts of this run;
+  # the token of the review repository is used only for the final commands.
+  publish:
+    needs:
+      - detect
+      - prepare
+      - build-25-12
+      - build-main
+      - test-25-12
+      - test-main
+      - image-25-12
+      - image-main
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      actions: read
+    defaults:
+      run:
+        shell: bash
+    env:
+      REVIEW_REPOSITORY: ${{ needs.detect.outputs.review_repository }}
+      BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+      UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the configuration and the token
+        env:
+          TEST_UPSTREAM_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+        run: |
+          configured=$(scripts/check-config.sh packages/netbird/config.yml | grep '^review_repository=')
+          if [ "${configured}" != "review_repository=${REVIEW_REPOSITORY}" ]; then
+            echo "::error::review_repository changed since the detect job"
+            exit 1
+          fi
+          if [ -z "${TEST_UPSTREAM_TOKEN}" ]; then
+            echo "::error::the secret TEST_UPSTREAM_TOKEN is not set in this repository"
+            exit 1
+          fi
+
+      - name: List the jobs and artifacts of this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/jobs?filter=latest&per_page=100" \
+            --jq '.jobs[] | {name, conclusion, html_url, failed_steps: [(.steps // [])[] | select(.conclusion == "failure") | .name]}' >jobs.jsonl
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/artifacts?per_page=100" \
+            --jq '.artifacts[] | {name}' >artifacts.jsonl
+          wc -l jobs.jsonl artifacts.jsonl
+
+      - name: Build the description
+        id: report
+        env:
+          PACKAGE: ${{ needs.detect.outputs.package }}
+          OLD_VERSION: ${{ needs.detect.outputs.current }}
+          NEW_VERSION: ${{ needs.detect.outputs.target }}
+          UPSTREAM_REPOSITORY: ${{ needs.detect.outputs.upstream_repository }}
+          REVIEW_IS_FORK: ${{ needs.detect.outputs.review_is_fork }}
+          BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
+          HEAD_SHA: ${{ needs.prepare.outputs.sha }}
+        run: |
+          python3 -B scripts/report.py \
+            --package "${PACKAGE}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
+            --upstream-repository "${UPSTREAM_REPOSITORY}" \
+            --review-repository "${REVIEW_REPOSITORY}" --review-is-fork "${REVIEW_IS_FORK}" \
+            --base-branch "${BASE_BRANCH}" --update-branch "${UPDATE_BRANCH}" \
+            --base-sha "${BASE_SHA}" --head-sha "${HEAD_SHA}" \
+            --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --jobs jobs.jsonl --artifacts artifacts.jsonl --out body.md | tee -a "${GITHUB_OUTPUT}"
+          cat body.md >>"${GITHUB_STEP_SUMMARY}"
+
+      # Both views must agree: the result of the three jobs of line main as
+      # GitHub reports it, and the job list the description was built from.
+      - name: Decide
+        id: decide
+        env:
+          BUILD: ${{ needs.build-main.result }}
+          TEST: ${{ needs.test-main.result }}
+          IMAGE: ${{ needs.image-main.result }}
+          REPORT_PASSED: ${{ steps.report.outputs.main_passed }}
+        run: |
+          if [ "${BUILD}" = success ] && [ "${TEST}" = success ] && [ "${IMAGE}" = success ] && [ "${REPORT_PASSED}" = true ]; then
+            open=true
+          else
+            open=false
+          fi
+          echo "line main: build=${BUILD} test=${TEST} image=${IMAGE} report=${REPORT_PASSED} -> open pull request: ${open}"
+          echo "open=${open}" >>"${GITHUB_OUTPUT}"
+
+      - name: Open the draft pull request
+        if: ${{ steps.decide.outputs.open == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+          PR_TITLE: "${{ needs.detect.outputs.package }}: update to ${{ needs.detect.outputs.target }}"
+          PR_BODY_FILE: body.md
+        run: |
+          url=$(scripts/open-pr.sh)
+          echo "pull request: ${url}"
+          echo "### Pull request" >>"${GITHUB_STEP_SUMMARY}"
+          echo "${url}" >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Line main failed, delete the two branches
+        if: ${{ steps.decide.outputs.open != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+        run: |
+          scripts/discard-branches.sh | tee -a "${GITHUB_STEP_SUMMARY}"
+          echo "::notice::line main did not pass: no pull request was opened and the branches were deleted from ${REVIEW_REPOSITORY}"

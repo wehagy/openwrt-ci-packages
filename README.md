@@ -14,6 +14,8 @@ package test.
   package needs something other than the base defaults, `memory`, `targets`,
   `apk_timeout` and `services_disabled` of the QEMU tests. The file documents
   every key.
+  The keys of `update.yml` (`package_path`, `upstream_repository`,
+  `review_repository`, `review_branch`) are described in "Update workflow".
 - `packages/<name>/tests/` (optional): pytest files that run next to the
   generic test in the QEMU VM. Missing directory: only the generic test runs.
   For `netbird` they are the runtime tests described in "NetBird runtime
@@ -29,6 +31,10 @@ package test.
   by number, `workflow_dispatch` only (see "Testing an upstream pull request").
 - `scripts/upstream-pr/`: its shell (`lib.sh`, `resolve.sh`, `compose.sh`) and
   `selftest.sh`, which the workflow runs first.
+- `.github/workflows/update.yml`: a new NetBird release becomes a draft pull
+  request for manual review (see "Update workflow").
+- `scripts/`: POSIX shell and Python used by `update.yml`, with self-tests
+  (`update-selftest.sh`, `report_selftest.py`) that the workflow runs first.
 - `.github/actionlint.yaml`: declares the `ubuntu-26.04` label for actionlint.
 
 ## How `ci.yml` uses the base
@@ -183,6 +189,48 @@ fits; their limits are the `IMAGE_SIZE` of the device in `openwrt/openwrt`, tag
 `tplink_archer-c7-v4` and `totolink_x5000r` (16 MB flash) are declared
 `:too-big` in `config.yml`: their job is green only when the Image Builder
 proves, with numbers, that the image does not fit.
+
+## Update workflow (`update.yml`)
+
+A new release of `netbirdio/netbird` becomes a draft pull request, once. CI
+never writes to `openwrt/packages`; you open the upstream pull request by hand.
+
+| Job | What it does |
+|---|---|
+| `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for an existing branch or pull request (any state) of that version. Read only. |
+| `prepare` | token job 1. Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. |
+| `build-*`, `test-*`, `image-*` | the base, for both lines, with `feed_repository` = review repository and `feed_ref` = the SHA of the update branch. No secrets. |
+| `publish` | token job 2. Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise deletes both branches. Line `25.12` may fail; the description says so. |
+
+- Start: daily at 05:17 UTC (the schedule runs from the default branch only) and
+  `workflow_dispatch` with the optional input `version` (`X.Y.Z`, newer than the
+  review repository's; empty: the latest release).
+- Review repository: the one key `review_repository` of
+  `packages/netbird/config.yml`. `scripts/check-config.sh` validates it in
+  `detect`, `prepare` and `publish`, and every script that writes re-checks it:
+  the owner `openwrt` (any letter case) is refused. The only writing commands
+  are in `prepare-branches.sh` (`git push origin`, `origin` checked to be the
+  review repository), `open-pr.sh` and `discard-branches.sh` (`gh ... --repo
+  "${REVIEW_REPOSITORY}"`).
+- Test mode: `wehagy/w`, a copy of `openwrt/packages` that is not a fork. The
+  description then says that the upstream link is only generated and does not
+  work. Production: `review_repository: wehagy/packages` (the fork); do this
+  only with the owner's approval, with a token for that repository. For a fork
+  the description links `.../openwrt/packages/compare/master...<owner>:<repo>:<branch>?expand=1&title=...&body=...`.
+- Secret `TEST_UPSTREAM_TOKEN`: fine-grained token, owner `wehagy`, only the
+  review repository, Contents and Pull requests: read and write. Used only by
+  `prepare` and `publish`; a missing secret fails `prepare` before any build.
+  The test jobs get no secrets (`secrets: inherit` would hand them the token),
+  so the NetBird runtime tests that need `NB_SETUP_KEY` cannot be added to this
+  workflow as it is.
+- The hash is the sha256 of the source archive (`scripts/source-sha256.sh`), not
+  `make package/netbird/check FIXUP=1`; `prepare` first checks that the archive
+  of the current version hashes to the `PKG_HASH` already in the Makefile, and
+  the SDK build checks the new hash again when it downloads the archive.
+- Go module vendoring is not in the Makefile: nothing else changes.
+- The base is called at `@feat/feed-source` with `ci_ref: feat/feed-source`,
+  because `feed_repository` and `feed_ref` are not in the base `main` yet. Both
+  switch to `@main` and `ci_ref: main` when that branch is integrated.
 
 ## Secrets
 

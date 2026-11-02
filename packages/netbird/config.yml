@@ -1,14 +1,31 @@
 # Responsibility: the data of the package netbird that the caller workflows
 # (.github/workflows/ci.yml, upstream-pr.yml, custom-image.yml) read through
-# scripts/images/config.sh. The base (wehagy/openwrt-ci) names no package and
-# no device: the package is built from openwrt/packages, tested by the generic
-# package test and put into the images listed here; package-specific tests,
+# scripts/images/config.sh, and update.yml, which reads the keys marked
+# "update.yml" through scripts/check-config.sh. The base (wehagy/openwrt-ci)
+# names no package and no device: the package is built from openwrt/packages,
+# tested by the generic package test and put into the images listed here;
+# package-specific tests,
 # when they exist, go in packages/netbird/tests (see README.md): the NetBird
 # runtime tests there need the repository secret NB_SETUP_KEY (ci.yml passes it
 # as test_secrets); without it they are skipped.
 #
 # Keys:
 #   package   name of the package, a directory of openwrt/packages
+#   package_path         update.yml: directory of the package in that tree,
+#                        <section>/<package>
+#   upstream_repository  update.yml: GitHub project whose latest release it
+#                        watches
+#   review_repository    update.yml: THE one setting that says where it pushes
+#                        its two branches and opens the draft pull request. The
+#                        owner openwrt is refused (scripts/check-config.sh), so
+#                        CI can never write to openwrt/packages. Test mode:
+#                        wehagy/w, a copy of openwrt/packages that is not a
+#                        fork. Production, only after the owner approves:
+#                        wehagy/packages, the fork. Changing it also needs a
+#                        token (TEST_UPSTREAM_TOKEN) with access to the new
+#                        repository.
+#   review_branch        update.yml: branch of review_repository the bump
+#                        starts from
 #   memory    optional; VM memory of the QEMU tests, NNNM from 64M to 1024M.
 #             Without it the base default (128M) applies. netbird needs 256M:
 #             at 128M it was OOM-killed on x86-64 (run 41480369349).
@@ -43,6 +60,10 @@
 #               (ramips/image/mt7621.mk:1563), buffalo_wzr-hp-g450h 32256k
 #               (ath79/image/generic.mk:729).
 package: netbird
+package_path: net/netbird
+upstream_repository: netbirdio/netbird
+review_repository: wehagy/w
+review_branch: master
 memory: 256M
 apk_timeout: 120
 images:
