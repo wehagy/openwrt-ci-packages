@@ -151,7 +151,7 @@ printf '%s' '{"base":{"ref":"openwrt-24.10"},"head":{"sha":"abc123"},"state":"cl
 : >"${work}/summary.md"
 : >"${work}/output.txt"
 run_resolve() {
-	PATH="${work}/bin:${PATH}" STUB_LOG="${work}/stub.log" STUB_RESPONSE="${work}/pr-24.json" \
+	GH_TOKEN=selftest-not-a-token PATH="${work}/bin:${PATH}" STUB_LOG="${work}/stub.log" STUB_RESPONSE="${work}/pr-24.json" \
 		PR_NUMBER=$1 GITHUB_OUTPUT="${work}/output.txt" GITHUB_STEP_SUMMARY="${work}/summary.md" \
 		"${here}/resolve.sh"
 }
