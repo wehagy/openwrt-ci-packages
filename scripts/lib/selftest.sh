@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 # Responsibility: the counters and the case runners shared by the self-tests of
 # the update workflow (update-selftest.sh, flow-selftest.sh). Sourced, not run.
-# The caller sets `work` (a scratch directory) before using status_case, and
-# ends with `finish`.
+# It creates the scratch directory `work` (removed on exit); the caller ends
+# with `finish`.
 #
 # Usage:
 #   . "${script_dir}/lib/selftest.sh"
@@ -11,6 +11,8 @@
 
 failures=0
 checks=0
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
 
 # Record the result of one case.
 #
@@ -47,6 +49,63 @@ status_case() {
 		sc_text=$(cat "${work}/out")
 		record "${sc_name}" 1 "exit ${sc_rc}, expected ${sc_want}: ${sc_text}"
 	fi
+}
+
+# Run a check and record it: it passes when the command exits 0.
+#
+# Arguments:
+#   $1  case name
+#   $2  detail printed on failure: the path of a file to print, or the text
+#   $3...  command
+check() {
+	ck_name=$1
+	ck_detail=$2
+	shift 2
+	if "$@"; then
+		record "${ck_name}" 0 ""
+		return 0
+	fi
+	if [ -f "${ck_detail}" ]; then
+		ck_text=$(cat "${ck_detail}")
+	else
+		ck_text=${ck_detail}
+	fi
+	record "${ck_name}" 1 "${ck_text}"
+}
+
+# Succeed when a file contains a fixed string.
+#
+# Arguments:
+#   $1  file
+#   $2  text
+has() {
+	grep -Fq -- "$2" "$1"
+}
+
+# Succeed when a file does not contain a fixed string.
+#
+# Arguments:
+#   $1  file
+#   $2  text
+lacks() {
+	! grep -Fq -- "$2" "$1"
+}
+
+# Succeed when a file is empty.
+#
+# Arguments:
+#   $1  file
+empty() {
+	[ ! -s "$1" ]
+}
+
+# Succeed when two values are equal.
+#
+# Arguments:
+#   $1  value
+#   $2  value
+same() {
+	[ "$1" = "$2" ]
 }
 
 # Print the totals and fail if a case failed.

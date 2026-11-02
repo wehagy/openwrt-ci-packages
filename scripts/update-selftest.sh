@@ -17,11 +17,9 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
 . "${script_dir}/lib/common.sh"
+# shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/selftest.sh
 . "${script_dir}/lib/selftest.sh"
-
-work=$(mktemp -d)
-trap 'rm -rf "${work}"' EXIT
 
 # Run a validator of lib/common.sh in a subshell (die exits it) and check that
 # it accepts or rejects the value. The value is not printed.
@@ -201,7 +199,6 @@ status_case "check-config refuses a package_path of another package" 1 "${script
 write_config wehagy/w
 sed -i '/^review_repository:/d' "${work}/config.yml"
 status_case "check-config refuses a missing review_repository" 1 "${script_dir}/check-config.sh" "${work}/config.yml"
-
 
 # --- the flows with stubs of curl, gh and git -------------------------------
 # A child process with its own counters: its failure fails this script too.
