@@ -1,0 +1,9 @@
+# actionlint configuration.
+#
+# actionlint 1.7.12 (latest release, also current main) does not know the
+# GitHub-hosted label ubuntu-26.04 yet (GA in actions/runner-images). Declare
+# it here so the runner-label check keeps validating every other label.
+# Remove this entry once actionlint ships the label.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

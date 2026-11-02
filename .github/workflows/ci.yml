@@ -1,0 +1,118 @@
+# Calls the reusable base wehagy/openwrt-ci for every package of this
+# repository (packages/<name>/config.yml): build both lines, test each build in
+# QEMU, build its images. Runs on push to feature branches and by hand.
+#
+# While the base branch feat/reusable is not on main, the workflows and the
+# scripts both come from it (`@feat/reusable` and ci_ref: feat/reusable).
+name: ci
+
+on:
+  push:
+    branches: ["feat/**"]
+  workflow_dispatch:
+    inputs:
+      refresh_sdk:
+        description: Rebuild the SDK images of the selected lines even when fresh
+        type: boolean
+        default: false
+      lines:
+        description: Lines to build
+        type: choice
+        options: [both, "25.12", main]
+        default: both
+
+permissions:
+  contents: read
+
+jobs:
+  # packages/netbird/config.yml is the one place with the package name.
+  config:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      package: ${{ steps.read.outputs.package }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read packages/netbird/config.yml
+        id: read
+        run: |
+          package=$(yq -r .package packages/netbird/config.yml)
+          case "${package}" in
+            '' | null | *[!a-z0-9._+-]*) echo "::error::invalid package in packages/netbird/config.yml"; exit 1 ;;
+            *) ;;
+          esac
+          echo "package=${package}" | tee -a "${GITHUB_OUTPUT}"
+
+  # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
+  # packages: write (and Manage Actions access of this repository on the
+  # package ghcr.io/wehagy/openwrt-sdk).
+  build-25-12:
+    if: ${{ inputs.lines != 'main' }}
+    needs: config
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: "25.12"
+      package: ${{ needs.config.outputs.package }}
+      refresh_sdk: ${{ inputs.refresh_sdk == true }}
+
+  build-main:
+    if: ${{ inputs.lines != '25.12' }}
+    needs: config
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: main
+      package: ${{ needs.config.outputs.package }}
+      refresh_sdk: ${{ inputs.refresh_sdk == true }}
+
+  # tests_path: a missing directory means only the generic test runs.
+  # secrets: inherit + test_secrets: the named secrets reach only the tests.
+  test-25-12:
+    needs: [config, build-25-12]
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: "25.12"
+      package: ${{ needs.config.outputs.package }}
+      source: artifact
+      tests_path: packages/${{ needs.config.outputs.package }}/tests
+      test_secrets: NB_SETUP_KEY
+    secrets: inherit
+
+  test-main:
+    needs: [config, build-main]
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: main
+      package: ${{ needs.config.outputs.package }}
+      source: artifact
+      tests_path: packages/${{ needs.config.outputs.package }}/tests
+      test_secrets: NB_SETUP_KEY
+    secrets: inherit
+
+  image-25-12:
+    needs: [config, build-25-12]
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: "25.12"
+      package: ${{ needs.config.outputs.package }}
+
+  image-main:
+    needs: [config, build-main]
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/reusable
+    with:
+      ci_ref: feat/reusable
+      line: main
+      package: ${{ needs.config.outputs.package }}
