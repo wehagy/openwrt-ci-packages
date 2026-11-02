@@ -40,6 +40,9 @@ in `test_secrets` reach the tests, as environment variables of `pytest`
 (`NB_SETUP_KEY` for netbird). Values are never printed; a missing secret is an
 empty variable, so a test can skip with a reason.
 
+The log of the `Run tests` step lists the names of all secrets of this
+repository (`"NAME": "***"`), never their values.
+
 ## SDK image access (once, by the owner)
 
 The base reuses the public SDK image `ghcr.io/wehagy/openwrt-sdk` when it is
