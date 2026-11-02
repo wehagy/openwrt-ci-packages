@@ -1,6 +1,6 @@
 """Responsibility: turn the jobs and artifacts of an update.yml run into the body
 of the draft pull request: the results of both lines (build, QEMU tests, images)
-and the ready link that opens the upstream pull request by hand. Nothing here
+the test suites that ran (and the ones that did not) and the ready link that\nopens the upstream pull request by hand. Nothing here
 talks to GitHub or writes to any repository; the workflow feeds it JSON lines
 and publishes the text.
 
@@ -148,6 +148,35 @@ def upstream_link(args: argparse.Namespace, main_jobs: list[Job]) -> str:
     )
 
 
+def tests_section(args: argparse.Namespace) -> list[str]:
+    """Which test suites ran, so a skipped suite is never read as a passed one.
+
+    The test jobs of this workflow have no secrets, so the package tests that
+    need one (for NetBird, NB_SETUP_KEY) skip. A green QEMU test is then the
+    generic package test, which proves install and files, not that the program
+    works; the description has to say it.
+    """
+    directory = f"packages/{args.package}/tests"
+    if args.package_tests == "present":
+        runtime = (
+            f"ran without secrets (`{directory}`): tests that need a secret "
+            "such as `NB_SETUP_KEY` are skipped, not passed"
+        )
+    else:
+        runtime = f"**NOT RUN**: `{directory}` does not exist"
+    caution = (
+        "**A green QEMU test above is the generic test only. It does not show "
+        "that the program works at runtime.**\n"
+    )
+    return [
+        "## Test suites that ran\n",
+        "| Suite | Ran |\n|---|---|",
+        "| Generic package test in QEMU (install and files) | yes, see Results |",
+        f"| Package runtime tests | {runtime} |\n",
+        caution,
+    ]
+
+
 def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -> str:
     """The full pull request description."""
     out = []
@@ -168,6 +197,7 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
         f"| Built (line `main`) | {args.review_repository} @ `{args.feed_sha_main}` |\n"
         f"| Built (line `25.12`) | {args.review_repository} @ `{args.feed_sha_25_12}` |\n"
     )
+    out.extend(tests_section(args))
     out.append("## Results\n")
     out.append("| Line | Build (SDK) | QEMU test | Images |\n|---|---|---|---|")
     for line in LINES:
@@ -237,6 +267,7 @@ def main(argv: list[str] | None = None) -> int:
     ):
         parser.add_argument(f"--{option}", required=True)
     parser.add_argument("--review-is-fork", choices=("true", "false"), required=True)
+    parser.add_argument("--package-tests", choices=("present", "none"), required=True)
     args = parser.parse_args(argv)
     jobs = parse_jobs(read_jsonl(args.jobs))
     artifacts = {a["name"] for a in read_jsonl(args.artifacts)}

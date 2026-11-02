@@ -71,6 +71,7 @@ def args_for(**extra: str) -> argparse.Namespace:
         "feed_sha_main": "b" * 40,
         "feed_sha_25_12": "c" * 40,
         "run_url": "https://example.invalid/runs/1",
+        "package_tests": "none",
     }
     values.update(extra)
     return argparse.Namespace(**values)
@@ -152,6 +153,38 @@ class ReportTest(unittest.TestCase):
         self.assertNotIn("not a fork", body)
         self.assertIn("[Open the upstream pull request](https://github.com/", body)
         self.assertIn("compare/master...wehagy:packages:", body)
+
+    def test_missing_runtime_tests_are_said_not_run(self) -> None:
+        body, _ = self.body(package_tests="none")
+        self.assertIn("## Test suites that ran", body)
+        self.assertIn(
+            "| Package runtime tests | **NOT RUN**: `packages/netbird/tests` does not "
+            "exist |",
+            body,
+        )
+        self.assertIn("A green QEMU test above is the generic test only", body)
+
+    def test_runtime_tests_without_secrets_are_said_skipped(self) -> None:
+        body, _ = self.body(package_tests="present")
+        self.assertIn(
+            "tests that need a secret such as `NB_SETUP_KEY` are skipped", body
+        )
+        self.assertNotIn("NOT RUN", body)
+        self.assertIn("A green QEMU test above is the generic test only", body)
+
+    def test_suites_come_before_the_results(self) -> None:
+        body, _ = self.body()
+        self.assertLess(body.index("## Test suites that ran"), body.index("## Results"))
+
+    def test_cli_requires_the_suites(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            argv = []
+            for key, value in vars(args_for()).items():
+                if key != "package_tests":
+                    argv += [f"--{key.replace('_', '-')}", value]
+            argv += ["--jobs", "j", "--artifacts", "a", "--out", os.path.join(tmp, "o")]
+            with self.assertRaises(SystemExit):
+                report.main(argv)
 
     def test_cli_writes_the_body_and_the_verdict(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

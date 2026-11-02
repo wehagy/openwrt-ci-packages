@@ -318,10 +318,22 @@ jobs:
             --jq '.artifacts[] | {name}' >artifacts.jsonl
           wc -l jobs.jsonl artifacts.jsonl
 
+      # The test jobs have no secrets, so tests that need one skip. The
+      # description says which suites exist and that the runtime ones did not
+      # pass, so a skipped suite is never read as a passed one.
+      - name: Look for the package runtime tests
+        id: suites
+        env:
+          PACKAGE: ${{ needs.detect.outputs.package }}
+        run: |
+          if [ -d "packages/${PACKAGE}/tests" ]; then suites=present; else suites=none; fi
+          echo "package_tests=${suites}" | tee -a "${GITHUB_OUTPUT}"
+
       - name: Build the description
         id: report
         env:
           PACKAGE: ${{ needs.detect.outputs.package }}
+          PACKAGE_TESTS: ${{ steps.suites.outputs.package_tests }}
           OLD_VERSION: ${{ needs.detect.outputs.current }}
           NEW_VERSION: ${{ needs.detect.outputs.target }}
           UPSTREAM_REPOSITORY: ${{ needs.detect.outputs.upstream_repository }}
@@ -333,7 +345,7 @@ jobs:
         run: |
           python3 -B scripts/report.py \
             --feed-sha-main "${FEED_SHA_MAIN}" --feed-sha-25-12 "${FEED_SHA_25_12}" \
-            --package "${PACKAGE}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
+            --package "${PACKAGE}" --package-tests "${PACKAGE_TESTS}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
             --upstream-repository "${UPSTREAM_REPOSITORY}" \
             --review-repository "${REVIEW_REPOSITORY}" --review-is-fork "${REVIEW_IS_FORK}" \
             --base-branch "${BASE_BRANCH}" --update-branch "${UPDATE_BRANCH}" \
