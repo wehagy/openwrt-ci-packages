@@ -123,31 +123,56 @@ and `nbci-vm-<run id>-<rand>`.
 | `test_ping_reference_peer_to_vm`      | the reference peer pings the VM over its NetBird IP                    |
 | `test_nftables_table_and_log`         | `nft list tables` has a table `netbird`; the client log has `creating an nftables firewall manager` |
 | `test_wt0_is_a_wireguard_link`        | `wt0` exists and sysfs says `DEVTYPE=wireguard` (BusyBox `ip` has no `-d`) |
-| `test_stop_removes_table_and_wt0`     | after `/etc/init.d/netbird stop` the table and `wt0` are gone (only if both were seen before) |
+| `test_stop_removes_table_and_wt0`     | after `/etc/init.d/netbird stop` the table and `wt0` are gone (only if both were seen before); records the shutdown time and procd's SIGKILL; runs under the `term_timeout 60` that the test applies (below) |
 
 - Without the secret (a fork, or a caller that does not pass it) every test is
   skipped with the reason `NB_SETUP_KEY is not set`; the generic test is not
   affected and no container is started.
 - Cleanup: the reference peer runs `netbird down` and its container is
-  removed at the end of the module. The VM peer leaves when the service stops
-  (`test_stop_removes_table_and_wt0`; a stop before `netbird down` is the point of
-  that test), and a teardown `netbird down` covers a run that failed earlier.
-  Ephemeral peers that stay disconnected are deleted by NetBird Cloud after
-  its inactivity period.
+  removed at the end of the module. The VM peer is not taken down before the
+  stop test (`netbird down` would remove the objects that test must prove).
+  A daemon that exits on SIGTERM leaves the network on its own; one that procd
+  SIGKILLs does not, and the teardown `netbird down` cannot reach a dead
+  daemon. Either way, ephemeral peers that stay disconnected are deleted by
+  NetBird Cloud after its inactivity period.
 - Memory: `test_memory_is_recorded` logs the daemon's `VmRSS` and `VmHWM` and
   the VM's `MemAvailable` (junit properties `netbird_*_kb`), never required.
   The tests free the `.apk` that the generic test leaves in `/tmp` (RAM)
   before they start the daemon. With the 128 MB x86-64 VM of an earlier base
   the kernel OOM-killed `netbird` (`Out of memory: Killed process ...
   (netbird)`); the base now gives that target 256 MB.
-- Known failure: on the `25.12` line (netbird 0.78.1) the stop test fails
-  now and then (seen on malta-le, malta-be and armsr-armv8, never on x86-64
-  or on `main`): the daemon needs more than procd's default 5 s to close its
-  peers (the account has many peers; the CPU is emulated), procd logs
-  `Instance netbird::instance1 pid N not stopped on SIGTERM, sending SIGKILL
-  instead`, and the nftables table and `wt0` stay behind. The init script of
-  the package has no `procd_set_param term_timeout`. The test reports it; it
-  is not relaxed.
+- procd `term_timeout 60` is applied by the test, not by the package:
+  before `netbird up`, the tests insert `procd_set_param term_timeout 60` into
+  the instance block of `/etc/init.d/netbird` in the VM, restart the service so
+  procd reads it, and fail unless `ubus call service list` reports
+  `term_timeout` 60 (both lines, all targets). The package under test is not
+  changed. Why: the init script of `net/netbird` in `openwrt/packages` has no
+  `term_timeout`, so procd sends SIGKILL 5 s after SIGTERM, and the daemon
+  needs longer on the emulated CPUs of this CI (it closes up to about 70
+  peers, which the shared setup key and the parallel jobs create). A SIGKILLed
+  daemon leaves the nftables table `netbird` and `wt0` behind, so the stop test
+  failed. Measured on the `25.12` line (netbird 0.78.1, `source: feed`, 10
+  runs per arm, 30 emulated jobs per arm): as shipped, the stop test failed in
+  7/30 jobs (10 procd SIGKILLs; malta-le 4/10, malta-be 3/10, armsr-armv8
+  0/10; x86-64 0/10); with `term_timeout 60`, 0/30 failures and 0 SIGKILLs;
+  longest shutdown 24.29 s (malta-be), 12/30 emulated jobs above 5 s (Fisher
+  exact, one-sided, p = 0.0053). Runs, control: 41504158032 41504375411
+  41505527205 41505553458 41508031201 41508055262 41509219773 41509245108
+  41510385303 41510407795; treatment: 41504161072 41504379764 41505539968
+  41505567017 41508043876 41508067173 41509232863 41509257304 41510396567
+  41510419171. Whether the fix goes to `openwrt/packages` is open; when the
+  package or its init script changes (a `term_timeout` of its own, another
+  upstream version), revisit `TERM_TIMEOUT` in `test_package_netbird.py` and
+  remove it if the package no longer needs it. The stop test is otherwise
+  strict: the table `netbird` and `wt0` must be gone, with a 120 s deadline.
+- The stop test measures the time from the stop call to the daemon's exit (in
+  the VM, from `/proc/uptime`) and whether procd logged `not stopped on
+  SIGTERM, sending SIGKILL instead` for that pid. Both go to the job summary
+  (section `netbird stop`) and to the junit properties
+  `netbird_stop_duration_s`, `netbird_stop_sigkill` and
+  `netbird_term_timeout_s`. A duration above 5 s adds a warning to the summary
+  and the junit property `netbird_stop_warning`: the package as shipped (procd
+  default `term_timeout` 5 s) would have sent SIGKILL.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
 
