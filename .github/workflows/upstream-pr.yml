@@ -6,9 +6,13 @@
 # imaged on the other line with the changed directories overlaid on that line's
 # branch of openwrt/packages (job `compose`). Read-only towards openwrt/packages.
 #
-# TEMPORARY: the base is called at feat/feed-source (`@feat/feed-source` and
-# ci_ref: feat/feed-source), the branch that adds feed_repository and feed_ref.
-# Both switch to main when that branch is integrated.
+# Upstream code is untrusted: its .apk runs in the QEMU VM and its tests run on
+# the runner, so no secret is passed to any build or test (no `secrets:`, no
+# `test_secrets`); the runtime tests that need one skip. The workflow is
+# `workflow_dispatch` only (never pull_request_target). It builds the head of
+# the PR (refs/pull/<n>/head, as a commit SHA) without merging its base.
+#
+# The base is called at `@main` with `ci_ref: main` (both must stay equal).
 name: upstream-pr
 
 on:
@@ -44,6 +48,7 @@ jobs:
       matrix_all: ${{ steps.resolve.outputs.matrix_all }}
       matrix_full: ${{ steps.resolve.outputs.matrix_full }}
       has_full: ${{ steps.resolve.outputs.has_full }}
+      skipped: ${{ steps.resolve.outputs.skipped }}
       overlay_dirs: ${{ steps.resolve.outputs.overlay_dirs }}
     steps:
       - uses: actions/checkout@v7.0.1
@@ -93,6 +98,8 @@ jobs:
         run: scripts/upstream-pr/compose.sh
 
   # --- the line of the PR's base branch: the PR tree itself -------------------
+  # feed_ref is the commit SHA that resolve read (the head of the PR), so every
+  # architecture and the summaries name the same tree.
   # packages: write because build.yml may rebuild the SDK image.
   build-pr:
     needs: resolve
@@ -102,31 +109,29 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       feed_repository: openwrt/packages
-      feed_ref: refs/pull/${{ needs.resolve.outputs.pr_number }}/head
+      feed_ref: ${{ needs.resolve.outputs.head_sha }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
 
-  # tests_path: a missing directory means only the generic test runs.
-  # secrets: inherit + test_secrets: the named secrets reach only the tests.
+  # tests_path: a missing directory means only the generic test runs. No
+  # secrets (see the header).
   test-pr:
     needs: [resolve, build-pr]
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_all) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       source: artifact
       tests_path: ${{ matrix.tests_path }}
-      test_secrets: ${{ matrix.test_secrets }}
-    secrets: inherit
 
   image-pr:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -134,9 +139,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
 
@@ -151,13 +156,13 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       feed_repository: ${{ github.repository }}
-      feed_ref: ${{ needs.compose.outputs.branch }}
+      feed_ref: ${{ needs.compose.outputs.sha }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
 
   test-other:
@@ -166,15 +171,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       source: artifact
       tests_path: ${{ matrix.tests_path }}
-      test_secrets: ${{ matrix.test_secrets }}
-    secrets: inherit
 
   image-other:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -182,9 +185,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/feed-source
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/feed-source
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
 

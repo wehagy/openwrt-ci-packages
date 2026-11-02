@@ -2,7 +2,8 @@
 # Responsibility: turn the PR number of the dispatch into what the jobs of
 # .github/workflows/upstream-pr.yml need: the line of the PR's base branch, the
 # changed packages (from the files of the PR and the Makefiles of its tree),
-# which of them have packages/<name>/ in this repository, and the job matrices.
+# which of them have packages/<name>/ in this repository, which the base can
+# build (the .apk must be named like the directory) and the job matrices.
 # Nothing is written to GITHUB_OUTPUT before every check passed. Read-only
 # towards openwrt/packages (GET requests and a git fetch).
 #
@@ -83,8 +84,8 @@ done
 
 # 4. Makefile directories of the PR tree (trees only: no blob is downloaded).
 git init -q "${work}/feed"
-git -C "${work}/feed" fetch -q --depth=1 --filter=blob:none \
-	"https://github.com/${upstream}.git" "refs/pull/${PR_NUMBER}/head"
+git -C "${work}/feed" remote add origin "https://github.com/${upstream}.git"
+git -C "${work}/feed" fetch -q --depth=1 --filter=blob:none origin "refs/pull/${PR_NUMBER}/head"
 fetched=$(git -C "${work}/feed" rev-parse FETCH_HEAD)
 if [ "${fetched}" != "${head_sha}" ]; then
 	fail "the head of pull request ${PR_NUMBER} moved during the run (${head_sha} -> ${fetched}): run again"
@@ -105,8 +106,10 @@ if [ "${count}" -gt "${max_packages}" ]; then
 fi
 
 # 5. One row per package: name, directory, local (packages/<name>/ exists) and
-# the secrets of its tests (packages/<name>/config.yml, key test_secrets).
+# buildable (its Makefile defines a package called like the directory). The
+# others are reported and left out: the base would fail at "no <name> .apk".
 : >"${work}/rows.tsv"
+: >"${work}/skipped.txt"
 while read -r dir; do
 	name=${dir##*/}
 	check_package_name "${name}"
@@ -118,25 +121,26 @@ while read -r dir; do
 		;;
 	*) ;;
 	esac
+	git -C "${work}/feed" show "FETCH_HEAD:${dir}/Makefile" >"${work}/Makefile"
+	defines=$(makefile_defines_package "${name}" <"${work}/Makefile")
+	if [ "${defines}" = no ]; then
+		defined=$(makefile_package_names <"${work}/Makefile" | tr '\n' ' ')
+		echo "${dir}: its Makefile defines [${defined% }], none named ${name}: the base builds by package name and takes the .apk of that name" >>"${work}/skipped.txt"
+		continue
+	fi
 	if [ -d "packages/${name}" ]; then
 		is_local=true
-		secrets=""
-		if [ -f "packages/${name}/config.yml" ]; then
-			secrets=$(yq -r '.test_secrets // ""' "packages/${name}/config.yml")
-		fi
-		case "${secrets}" in
-		*[!A-Z0-9_\ ,]*)
-			fail "packages/${name}/config.yml: test_secrets has unexpected characters"
-			exit 1
-			;;
-		*) ;;
-		esac
 	else
 		is_local=false
-		secrets=""
 	fi
-	printf '%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" "${secrets}" >>"${work}/rows.tsv"
+	printf '%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" >>"${work}/rows.tsv"
 done <"${work}/pkgdirs.txt"
+if [ ! -s "${work}/rows.tsv" ]; then
+	while read -r line_skipped; do
+		fail "not testable: ${line_skipped}"
+	done <"${work}/skipped.txt"
+	exit 1
+fi
 dups=$(cut -f1 "${work}/rows.tsv" | sort | uniq -d | wc -l)
 if [ "${dups}" -ne 0 ]; then
 	fail "two changed packages have the same name: the base builds by name"
@@ -148,12 +152,12 @@ fi
 rows_json=$(jq -R -s -c '
 	split("\n") | map(select(length > 0) | split("\t")
 	| {package: .[0], dir: .[1], local: (.[2] == "true"),
-	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end),
-	   test_secrets: .[3]})' "${work}/rows.tsv")
+	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end)})' "${work}/rows.tsv")
 matrix_all=$(printf '%s' "${rows_json}" | jq -c '{include: .}')
 matrix_full=$(printf '%s' "${rows_json}" | jq -c '{include: map(select(.local))}')
 has_full=$(printf '%s' "${rows_json}" | jq -r 'any(.[]; .local)')
 overlay_dirs=$(tr '\n' ' ' <"${work}/pkgdirs.txt" | sed 's/ $//')
+skipped_count=$(wc -l <"${work}/skipped.txt")
 
 # 7. Outputs, after every check.
 {
@@ -166,6 +170,7 @@ overlay_dirs=$(tr '\n' ' ' <"${work}/pkgdirs.txt" | sed 's/ $//')
 	echo "matrix_full=${matrix_full}"
 	echo "has_full=${has_full}"
 	echo "overlay_dirs=${overlay_dirs}"
+	echo "skipped=${skipped_count}"
 } >>"${GITHUB_OUTPUT}"
 
 # 8. Summary, in the job log too.
@@ -175,13 +180,19 @@ overlay_dirs=$(tr '\n' ' ' <"${work}/pkgdirs.txt" | sed 's/ $//')
 	echo "- title: ${title}"
 	echo "- state: ${state}, base branch: ${base_ref} -> line ${line}, other line: ${other} (branch ${other_branch})"
 	echo "- head: ${head_sha} (refs/pull/${PR_NUMBER}/head), ${changed_files} changed files"
-	echo "- changed packages: ${count} (directory, name, packages/<name>/ here, tests secrets)"
-	while IFS="$(printf '\t')" read -r name dir is_local secrets; do
+	echo "- built as the head commit, without merging the base branch (refs/pull/${PR_NUMBER}/merge is not used)"
+	echo "- no secret reaches the build or the tests of an upstream pull request: tests that need one skip"
+	echo "- changed packages: ${count} (directory, name)"
+	while IFS="$(printf '\t')" read -r name dir is_local; do
 		if [ "${is_local}" = true ]; then
 			pipeline="full pipeline on ${line} and, overlaid on ${other_branch}, on ${other}"
 		else
 			pipeline="build + generic test on ${line} only"
 		fi
-		echo "  - ${dir} (${name}): ${pipeline}${secrets:+; secrets ${secrets}}"
+		echo "  - ${dir} (${name}): ${pipeline}"
 	done <"${work}/rows.tsv"
+	while read -r line_skipped; do
+		echo "  - NOT TESTED ${line_skipped}"
+		echo "::warning title=package not tested::${line_skipped}"
+	done <"${work}/skipped.txt"
 } | tee -a "${GITHUB_STEP_SUMMARY}"

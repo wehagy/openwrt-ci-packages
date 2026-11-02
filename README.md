@@ -41,6 +41,13 @@ package test.
 
 Run by hand with `pr_number` (digits only, at most 7, no leading zero; optional
 `refresh_sdk`). It never writes to `openwrt/packages` (a `GET`, a `git fetch`).
+It is `workflow_dispatch` only, never `pull_request_target`.
+
+**No secret reaches an upstream pull request.** Its code is untrusted: the
+built `.apk` runs in the QEMU VM and the tests run on the runner. So the jobs
+have no `secrets:` and no `test_secrets`; the NetBird runtime tests that need
+`NB_SETUP_KEY` skip, which is expected. The `tests/` of `packages/<name>/` of
+this repository still run (that code is ours, not the PR's).
 
 1. `resolve` (self-test first): the PR's base branch gives the line (`master`:
    `main`, `openwrt-25.12`: `25.12`; any other base fails with `unsupported
@@ -49,24 +56,28 @@ Run by hand with `pr_number` (digits only, at most 7, no leading zero; optional
    belongs to its package); renames count at both paths. A PR with no package
    or with more than 5 fails; a package the PR only removes has no `Makefile`
    and is not tested. The job summary lists them.
-2. Every changed package: `build.yml` on `feed_repository: openwrt/packages`,
-   `feed_ref: refs/pull/<n>/head`, then `test.yml` (generic test; a package
-   with `packages/<name>/` also gets its `tests/` and `test_secrets` from
-   `config.yml`).
+   The base builds one package by name and takes the `.apk` of that name, so a
+   package whose Makefile has no `define Package/<directory name>` (`udns`
+   builds `libudns`, `python-yaml` builds `python3-yaml`) is reported as `NOT
+   TESTED` with the names it defines (summary and a warning), and the run fails
+   if no package is left.
+2. Every testable package: `build.yml` with `feed_repository: openwrt/packages`
+   and `feed_ref` the head commit SHA that `resolve` read, then `test.yml`
+   (generic test; a package with `packages/<name>/` also gets its `tests/`).
+   The head of the PR is built as it is: the base branch is not merged into it
+   and `refs/pull/<n>/merge` is not used (the base refuses that ref).
 3. Packages with `packages/<name>/` here: also `images.yml`, and the whole
    pipeline again on the other line. The base builds one repository and ref, so
    `compose` pushes `upstream-overlay/pr<n>-<run id>-<attempt>` to this
    repository: the other line's `openwrt/packages` branch with the changed
    directories of the PR copied over it (one root commit, upstream `.github/`
-   dropped); `cleanup` deletes it when the builds are done. Packages without
-   `packages/<name>/` run on the PR's line only.
-4. The base is called at `@feat/feed-source` with `ci_ref: feat/feed-source`
-   (the branch that adds `feed_repository` and `feed_ref`); both change to `main`
-   when it is integrated.
+   dropped), and `build.yml` builds its commit SHA; `cleanup` deletes the branch
+   when the builds are done. Packages without `packages/<name>/` run on the
+   PR's line only.
+4. The base is called at `@main` with `ci_ref: main`.
 
-Limits: `test_secrets` is read from `packages/<name>/config.yml` here, while
-`ci.yml` still names `NB_SETUP_KEY` itself. One failed build of a package skips
-the test jobs of all packages of that line (they need the whole matrix).
+Limit: one failed build of a package skips the test jobs of all packages of
+that line (they need the whole matrix).
 
 ## Secrets
 

@@ -107,6 +107,25 @@ check_package_name() {
 	fi
 }
 
+# The base builds one package by name and takes the .apk of that name, so the
+# Makefile of <dir>/ must define a package called like the directory (the
+# source package udns builds libudns, python-yaml builds python3-yaml: both
+# fail in the base at "no <name> .apk"). Arguments: $1 the name. stdin: the
+# Makefile. Prints yes when it has a line `define Package/<name>`, else no.
+makefile_defines_package() {
+	if grep -Fxq "define Package/${1}"; then
+		echo yes
+	else
+		echo no
+	fi
+}
+
+# The packages a Makefile defines, one per line (for the message).
+# stdin: the Makefile.
+makefile_package_names() {
+	sed -n 's|^define Package/\([A-Za-z0-9._+-]*\)[[:space:]]*$|\1|p' | sort -u
+}
+
 # Directories of the feed tree that have a Makefile, from `git ls-tree -r
 # --name-only` on stdin. The top level has none, so it never matches.
 makefile_dirs() {

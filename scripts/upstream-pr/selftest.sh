@@ -130,6 +130,31 @@ net/other" sh -c ". '${here}/lib.sh'; detect_packages '${work}/dirs.txt' <'${wor
 printf 'README.md\n.github/x.yml\n' >"${work}/none.txt"
 expect_prints "no package changed" "" sh -c ". '${here}/lib.sh'; detect_packages '${work}/dirs.txt' <'${work}/none.txt'"
 
+# --- the .apk must be named like the directory ----------------------------------
+cat >"${work}/Makefile.ok" <<'MK'
+define Package/netbird
+  TITLE:=x
+endef
+define Package/netbird/description
+endef
+define Package/netbird-extra
+endef
+MK
+cat >"${work}/Makefile.udns" <<'MK'
+define Package/libudns
+endef
+define Package/libudns/description
+endef
+define Package/udns-utils
+endef
+MK
+expect_prints "Makefile defines the directory's package" yes sh -c ". '${here}/lib.sh'; makefile_defines_package netbird <'${work}/Makefile.ok'"
+expect_prints "Makefile of udns has no package udns" no sh -c ". '${here}/lib.sh'; makefile_defines_package udns <'${work}/Makefile.udns'"
+expect_prints "a longer name is not a match" no sh -c ". '${here}/lib.sh'; makefile_defines_package net <'${work}/Makefile.ok'"
+expect_prints "a dot is not a wildcard" no sh -c ". '${here}/lib.sh'; printf 'define Package/netbxrd\n' | makefile_defines_package netb.rd"
+expect_prints "package names of a Makefile" "libudns
+udns-utils" sh -c ". '${here}/lib.sh'; makefile_package_names <'${work}/Makefile.udns'"
+
 # --- resolve.sh refuses before any request -----------------------------------
 # curl is a stub that records a call; a bad number or an unsupported base must
 # not reach it (number) or must stop right after the one GET (base branch).
