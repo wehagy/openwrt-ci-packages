@@ -173,6 +173,11 @@ class Vm:
         _, _, rc = self.run(f"logread | grep -F {shlex.quote(text)}")
         return rc == 0
 
+    def syslog_tail(self, lines=15):
+        """Last syslog lines (procd reports how the daemon ended)."""
+        out, _, _ = self.run(f"logread | tail -n {lines}")
+        return "\n".join(out)
+
     def log_tail(self, lines=30):
         out, _, _ = self.run(f"tail -n {lines} {LOG_FILE}")
         return "\n".join(out)
