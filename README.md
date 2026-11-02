@@ -140,6 +140,14 @@ and `nbci-vm-<run id>-<rand>`.
   before they start the daemon. With the 128 MB x86-64 VM of an earlier base
   the kernel OOM-killed `netbird` (`Out of memory: Killed process ...
   (netbird)`); the base now gives that target 256 MB.
+- Known failure: on the `25.12` line (netbird 0.78.1) the stop test fails
+  now and then (seen on malta-le, malta-be and armsr-armv8, never on x86-64
+  or on `main`): the daemon needs more than procd's default 5 s to close its
+  peers (the account has many peers; the CPU is emulated), procd logs
+  `Instance netbird::instance1 pid N not stopped on SIGTERM, sending SIGKILL
+  instead`, and the nftables table and `wt0` stay behind. The init script of
+  the package has no `procd_set_param term_timeout`. The test reports it; it
+  is not relaxed.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
 
