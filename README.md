@@ -12,7 +12,8 @@ package test.
   name of a directory of `openwrt/packages` (read by the `config` job).
 - `packages/<name>/tests/` (optional): pytest files that run next to the
   generic test in the QEMU VM. Missing directory: only the generic test runs.
-  The directory does not exist yet for `netbird`: runtime tests are pending.
+  For `netbird` they are the runtime tests described in "NetBird runtime
+  tests" below.
 - `.github/workflows/ci.yml`: calls the base for `netbird` on push to
   `feat/**` and on `workflow_dispatch` (`refresh_sdk`, `lines`).
 - `.github/workflows/upstream-pr.yml`: tests a pull request of `openwrt/packages`
@@ -94,6 +95,53 @@ in `tests_path`.
 
 The log of the `Run tests` step lists the names of all secrets of this
 repository (`"NAME": "***"`), never their values.
+
+## NetBird runtime tests (`packages/netbird/tests/`)
+
+Files (copied by the base next to the generic test; `test_package_netbird.py`
+sorts after `test_package.py`, which installs the package):
+
+- `test_package_netbird.py`: the tests and their module fixtures.
+- `netbird_ref_peer.py`: the reference peer on the runner.
+- `netbird_vm.py`: the commands run in the VM.
+
+Setup: the repository secret `NB_SETUP_KEY` is a reusable, ephemeral setup key
+of NetBird Cloud (management URL: the client default). It is listed in
+`test_secrets` of `ci.yml`. The tests start the official client container
+`ghcr.io/netbirdio/netbird:<upstream version of the package>` on the runner
+with the same key (`docker run -e NB_SETUP_KEY`: the value is not on a command
+line) and wait until it is connected; the base needs no hook for that, because
+pytest runs on the runner. In the VM the key is a file given to
+`netbird up --setup-key-file`, removed right after (a command line would reach
+the labgrid logs uploaded as artifacts). Peer names: `nbci-ref-<run id>-<rand>`
+and `nbci-vm-<run id>-<rand>`.
+
+| Test                                  | Proves                                                                 |
+|---------------------------------------|------------------------------------------------------------------------|
+| `test_netbird_up`                     | `netbird up` works; `netbird status --json`: management and signal connected, the reference peer `Connected`; the connection type (`P2P` or `Relayed`) is logged and recorded as junit property `netbird_connection_type`, never required |
+| `test_ping_vm_to_reference_peer`      | VM pings the reference peer over its NetBird IP                        |
+| `test_ping_reference_peer_to_vm`      | the reference peer pings the VM over its NetBird IP                    |
+| `test_nftables_table_and_log`         | `nft list tables` has a table `netbird`; the client log has `creating an nftables firewall manager` |
+| `test_wt0_is_a_wireguard_link`        | `wt0` exists and sysfs says `DEVTYPE=wireguard` (BusyBox `ip` has no `-d`) |
+| `test_stop_removes_table_and_wt0`     | after `/etc/init.d/netbird stop` the table and `wt0` are gone (only if both were seen before) |
+
+- Without the secret (a fork, or a caller that does not pass it) every test is
+  skipped with the reason `NB_SETUP_KEY is not set`; the generic test is not
+  affected and no container is started.
+- Cleanup: the reference peer runs `netbird down` and its container is
+  removed at the end of the module. The VM peer leaves when the service stops
+  (`test_stop_removes_table_and_wt0`; a stop before `netbird down` is the point of
+  that test), and a teardown `netbird down` covers a run that failed earlier.
+  Ephemeral peers that stay disconnected are deleted by NetBird Cloud after
+  its inactivity period.
+- Memory: the x86-64 VM of the base has 128 MB (`harness/targets.yml`), about
+  104 MB usable. The kernel OOM-killed `netbird` there
+  (`Out of memory: Killed process ... (netbird)`), so these tests fail on
+  `x86-64` until the base gives that target more memory (256 MB like the other
+  targets). The tests only free the `.apk` that the generic test leaves in
+  `/tmp` (RAM) before they start the daemon.
+- The assertions and messages never print the key: it is a `Secret` object and
+  command output goes through `redact()`.
 
 ## SDK image access (once, by the owner)
 

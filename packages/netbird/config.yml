@@ -1,8 +1,8 @@
 # Responsibility: the data of the package netbird that the caller workflow
 # (.github/workflows/ci.yml) reads. The base (wehagy/openwrt-ci) needs nothing
 # else: the package is built from openwrt/packages and tested by the generic
-# package test; package-specific tests, when they exist, go in
-# packages/netbird/tests (see README.md).
+# package test plus the runtime tests in packages/netbird/tests, which need the
+# repository secret NB_SETUP_KEY (see README.md); without it they are skipped.
 #
 # Keys:
 #   package  name of the package, a directory of openwrt/packages
