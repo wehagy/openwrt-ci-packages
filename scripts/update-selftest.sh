@@ -3,7 +3,7 @@
 # inputs: the validators of lib/common.sh (above all, that the review
 # repository can never be a repository of the organization openwrt), the
 # version comparison, the expansion of the source URL, the Makefile bump and
-# check-config.sh. Every case runs; the script fails at the end if one failed.
+# check-config.sh, then flow-selftest.sh. Every case runs; the script fails at the end if one failed.
 # Needs yq (check-config.sh). A rejected value is never printed.
 #
 # Usage:
@@ -17,27 +17,11 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
 . "${script_dir}/lib/common.sh"
+# shellcheck source=lib/selftest.sh
+. "${script_dir}/lib/selftest.sh"
 
-failures=0
-checks=0
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
-
-# Record the result of one case.
-#
-# Arguments:
-#   $1  case name
-#   $2  0 if the case passed, otherwise it failed
-#   $3  detail printed on failure
-record() {
-	checks=$((checks + 1))
-	if [ "$2" -eq 0 ]; then
-		printf 'ok   %s\n' "$1"
-	else
-		printf 'FAIL %s: %s\n' "$1" "$3"
-		failures=$((failures + 1))
-	fi
-}
 
 # Run a validator of lib/common.sh in a subshell (die exits it) and check that
 # it accepts or rejects the value. The value is not printed.
@@ -68,26 +52,6 @@ gt_case() {
 	yes:gt | no:eq | no:lt) record "version_cmp $2 $3 is $1 newer" 0 "" ;;
 	*) record "version_cmp $2 $3 is $1 newer" 1 "${gc_out}" ;;
 	esac
-}
-
-# Check that a command exits with the expected status.
-#
-# Arguments:
-#   $1  case name
-#   $2  expected exit status
-#   $3...  command
-status_case() {
-	sc_name=$1
-	sc_want=$2
-	shift 2
-	sc_rc=0
-	"$@" >"${work}/out" 2>&1 || sc_rc=$?
-	if [ "${sc_rc}" -eq "${sc_want}" ]; then
-		record "${sc_name}" 0 ""
-	else
-		sc_text=$(cat "${work}/out")
-		record "${sc_name}" 1 "exit ${sc_rc}, expected ${sc_want}: ${sc_text}"
-	fi
 }
 
 nl='
@@ -238,5 +202,11 @@ write_config wehagy/w
 sed -i '/^review_repository:/d' "${work}/config.yml"
 status_case "check-config refuses a missing review_repository" 1 "${script_dir}/check-config.sh" "${work}/config.yml"
 
-printf '%s checks, %s failed\n' "${checks}" "${failures}"
-[ "${failures}" -eq 0 ]
+
+# --- the flows with stubs of curl, gh and git -------------------------------
+# A child process with its own counters: its failure fails this script too.
+flow_rc=0
+"${script_dir}/flow-selftest.sh" || flow_rc=$?
+record "flow-selftest.sh" "${flow_rc}" "see the FAIL lines above"
+
+finish

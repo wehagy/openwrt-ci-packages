@@ -72,6 +72,13 @@ if [ "${url_only}" = true ]; then
 	printf '%s\n' "${url}"
 	exit 0
 fi
-hash=$(curl --fail --silent --show-error --location --retry 3 --retry-all-errors "${url}" | sha256sum) ||
-	die "download of the source archive failed"
+# The archive goes to a file first: in `curl | sha256sum` a failed download
+# (404, network) leaves sha256sum hashing an empty stream, the pipeline exits 0
+# and the hash of nothing would be taken for PKG_HASH. POSIX sh has no pipefail.
+archive=$(mktemp)
+trap 'rm -f "${archive}"' EXIT
+curl --fail --silent --show-error --location --retry 3 --retry-all-errors \
+	--output "${archive}" "${url}" || die "download of the source archive failed"
+[ -s "${archive}" ] || die "the downloaded source archive is empty"
+hash=$(sha256sum "${archive}")
 printf '%s\n' "${hash%% *}"
