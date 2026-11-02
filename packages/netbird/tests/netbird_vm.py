@@ -26,8 +26,11 @@ QUERY_TIMEOUT = 30
 STATUS_TIMEOUT = 120
 UP_TIMEOUT = 180
 REMOTE_KEY = "/tmp/nb-setup-key"
+REMOTE_STOP_SCRIPT = "/tmp/nb-stop-measure.sh"
 APK_LEFTOVER = "/tmp/package-under-test.apk"  # test_package.py REMOTE_APK
 LOG_FILE = "/var/log/netbird/client.log"
+INIT_SCRIPT = "/etc/init.d/netbird"
+TERM_TIMEOUT_PARAM = "procd_set_param term_timeout"
 TABLE = re.compile(r"^table\s+\S+\s+netbird$")
 
 
@@ -155,6 +158,97 @@ class Vm:
         out, err, rc = self.run("ip link show wt0")
         devtype, _, _ = self.run("grep DEVTYPE /sys/class/net/wt0/uevent")
         return rc, "\n".join(out + err), "\n".join(devtype)
+
+    # -----------------------------------------------------------------
+    # procd term_timeout (applied by the test, not by the package)
+    # -----------------------------------------------------------------
+    def term_timeouts(self):
+        """The `term_timeout` (s) procd reports per netbird instance, by name."""
+        out, _, rc = self.run('ubus call service list \'{"name":"netbird"}\'')
+        if rc != 0:
+            return {}
+        try:
+            data = json.loads("\n".join(out))
+        except json.JSONDecodeError:
+            return {}
+        instances = (data.get("netbird") or {}).get("instances") or {}
+        return {name: inst.get("term_timeout") for name, inst in instances.items()}
+
+    def apply_term_timeout(self, seconds):
+        """Put `procd_set_param term_timeout N` in the init script's instance.
+
+        procd reads the init script when the service starts, so the service
+        is restarted. Returns the term_timeout values procd reports
+        afterwards, by instance name; the caller must check them.
+        """
+        _, err, rc = self.run(
+            f"sed -i '/procd_close_instance/i {TERM_TIMEOUT_PARAM} {int(seconds)}'"
+            f" {INIT_SCRIPT} && grep -c '{TERM_TIMEOUT_PARAM}' {INIT_SCRIPT}"
+        )
+        assert rc == 0, f"cannot add term_timeout to {INIT_SCRIPT}: rc={rc} {err}"
+        _, err, rc = self.run(f"{INIT_SCRIPT} restart", timeout=CMD_TIMEOUT)
+        assert rc == 0, f"{INIT_SCRIPT} restart failed with rc={rc}: {err}"
+        # The instance is registered with procd a moment after the restart.
+        _, _ = poll(lambda: (bool(self.term_timeouts()), "no instance yet"), 30)
+        return self.term_timeouts()
+
+    def stop_measured(self, timeout):
+        """Run `/etc/init.d/netbird stop` and time the daemon's exit.
+
+        One ssh call: the script polls the pid against the VM's monotonic
+        /proc/uptime, so the ssh latency is not in the number. The clock
+        starts before the stop call and ends when the process is gone (or
+        `timeout` s later: `still_running`). `sigkill` is whether procd
+        logged that this pid was not stopped on SIGTERM.
+
+        Returns a dict: stop_rc, pid, duration_s, sigkill (bool),
+        still_running (bool); the values are None where the VM printed none.
+        """
+        script = "\n".join(
+            [
+                "now() { cut -d' ' -f1 /proc/uptime; }",
+                "pid=$(pidof netbird | cut -d' ' -f1)",
+                "t0=$(now)",
+                f"{INIT_SCRIPT} stop; echo stop_rc=$?",
+                f"deadline=$(( ${{t0%.*}} + {int(timeout)} ))",
+                'while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do',
+                '  t=$(now); [ "${t%.*}" -gt "$deadline" ] && { echo still_running=1; break; }',
+                "  sleep 0.1 || sleep 1",
+                "done",
+                "t1=$(now)",
+                "echo pid=$pid t0=$t0 t1=$t1",
+                'echo sigkill=$(logread | grep -c "pid $pid not stopped on SIGTERM")',
+            ]
+        )
+        # A file: it is the way that ran on all targets (no quoting of the
+        # multi-line script through the labgrid ssh command line).
+        with tempfile.NamedTemporaryFile("w", suffix=".sh") as handle:
+            handle.write(script + "\n")
+            handle.flush()
+            self.ssh.put(handle.name, REMOTE_STOP_SCRIPT)
+        out, err, rc = self.run(
+            f"sh {REMOTE_STOP_SCRIPT}; rm -f {REMOTE_STOP_SCRIPT}", timeout=timeout + 60
+        )
+        found = {}
+        for line in out:
+            for token in line.split():
+                key, sep, value = token.partition("=")
+                if sep:
+                    found[key] = value
+        result = {
+            "script_rc": rc,
+            "stop_rc": int(found["stop_rc"]) if "stop_rc" in found else None,
+            "pid": found.get("pid") or None,
+            "still_running": found.get("still_running") == "1",
+            "sigkill": int(found.get("sigkill", "0") or 0) > 0,
+            "duration_s": None,
+            "output": out + err,
+        }
+        try:
+            result["duration_s"] = round(float(found["t1"]) - float(found["t0"]), 2)
+        except (KeyError, ValueError):
+            pass
+        return result
 
     def diagnostics(self):
         """Memory, load and the kernel log tail, for a failure message."""

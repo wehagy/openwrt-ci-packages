@@ -12,7 +12,23 @@ official client container, same version as the package, same setup key):
   4. the daemon created the nftables table `netbird` and says so in its log;
   5. wt0 is a wireguard link (sysfs DEVTYPE: BusyBox `ip` has no `-d`);
   6. the daemon's memory use is logged and recorded (never required);
-  7. after `/etc/init.d/netbird stop` the table and wt0 are gone.
+  7. after `/etc/init.d/netbird stop` the table and wt0 are gone; the time the
+     daemon needs to exit and whether procd had to SIGKILL it are recorded.
+
+procd term_timeout (read this before changing the stop test): the init script
+of the package has no `procd_set_param term_timeout`, so procd waits 5 s for
+SIGTERM and then sends SIGKILL, which leaves the nftables table `netbird` and
+wt0 behind. The daemon needs more than 5 s on the emulated CPUs of this CI
+(it closes up to ~70 peers: the test's own peer mesh). THE TEST, NOT THE
+PACKAGE, applies `procd_set_param term_timeout 60` in the VM before anything
+else (TERM_TIMEOUT below) and fails if procd does not report it. Measured on
+the 25.12 line (netbird 0.78.1, 10 runs per arm, emulated targets): as shipped
+the stop test failed in 7 of 30 jobs (10 procd SIGKILLs); with 60 s, 0 of 30
+and no SIGKILL, longest shutdown 24.29 s (malta-be). The measurement is in
+the README ("procd term_timeout"). When the package gets a term_timeout of
+its own, or the upstream init script changes, remove or revisit
+TERM_TIMEOUT: a stop that takes more than 5 s is reported as a warning in the
+job summary, because the package as shipped would have been SIGKILLed.
 
 Environment variables:
   NB_SETUP_KEY             setup key (test_secrets); absent or empty: every
@@ -22,14 +38,17 @@ Environment variables:
   GITHUB_RUN_ID            used in the peer names (optional)
 
 Ephemeral peers: the key creates peers that NetBird Cloud deletes after they
-stay disconnected. The reference peer runs `netbird down`; the VM peer leaves
-when the service stops (test 6), and a teardown `netbird down` covers a run
-that failed before that.
+stay disconnected. The reference peer runs `netbird down`; the VM peer is not
+taken down before the stop test (that would remove the objects the test must
+prove): a daemon that exits on SIGTERM leaves on its own, one that procd
+SIGKILLs does not, and `netbird down` in the teardown cannot reach a dead
+daemon. Either way NetBird Cloud deletes the peer after its inactivity period.
 """
 
 import logging
 import os
 import uuid
+from pathlib import Path
 
 import pytest
 from harness_util import env, poll
@@ -41,6 +60,10 @@ log = logging.getLogger("netbird")
 CONNECT_TIMEOUT = 120
 PING_TIMEOUT = 90
 STOP_TIMEOUT = 120
+# Applied by this test, NOT by the package (see the module docstring).
+TERM_TIMEOUT = 60
+# procd's term_timeout when the init script sets none: the package as shipped.
+PROCD_DEFAULT_TERM_TIMEOUT = 5
 FIREWALL_LOG = "creating an nftables firewall manager"
 
 
@@ -83,6 +106,14 @@ def vm(vm_ssh, setup_key, names, ref_peer):
         "/usr/bin/netbird is missing: test_package.py installs the package"
         " and runs before this file"
     )
+    # Before `netbird up`, so the daemon of the whole module runs under it.
+    reported = client.apply_term_timeout(TERM_TIMEOUT)
+    log.info("procd term_timeout reported for netbird: %s", reported)
+    assert reported and all(value == TERM_TIMEOUT for value in reported.values()), (
+        f"procd does not report term_timeout {TERM_TIMEOUT} for the netbird"
+        f" instance after the restart: {reported}"
+    )
+    State.term_timeout = TERM_TIMEOUT
     yield client
     # A run that failed before the stop test leaves the VM connected.
     client.run("netbird down", timeout=60)
@@ -92,6 +123,7 @@ class State:
     """Facts the later tests need from the earlier ones (file order)."""
 
     connected = False
+    term_timeout = None
     nft_table_seen = False
     wt0_seen = False
 
@@ -206,14 +238,78 @@ def test_memory_is_recorded(vm, record_property):
     assert "VmRSS" in memory, f"cannot read the daemon memory: {memory}"
 
 
-def test_stop_removes_table_and_wt0(vm):
+def stop_report(duration_s, sigkill, term_timeout):
+    """The stop measurement as (summary lines, warning text or None)."""
+    warning = None
+    if sigkill:
+        warning = (
+            f"procd sent SIGKILL although term_timeout is {term_timeout} s:"
+            " the daemon did not exit on SIGTERM in time"
+        )
+    elif duration_s is not None and duration_s > PROCD_DEFAULT_TERM_TIMEOUT:
+        warning = (
+            f"the daemon needed {duration_s} s to exit (> {PROCD_DEFAULT_TERM_TIMEOUT}"
+            " s): the package as shipped (procd default term_timeout"
+            f" {PROCD_DEFAULT_TERM_TIMEOUT} s) would have sent SIGKILL"
+        )
+    lines = [
+        (
+            f"- netbird stop: {duration_s} s from the stop call to the process exit;"
+            f" procd SIGKILL: {'yes' if sigkill else 'no'}"
+        ),
+        (
+            f"- term_timeout {term_timeout} s is applied by the test, not by the"
+            ' package (see the README, "procd term_timeout")'
+        ),
+    ]
+    if warning:
+        lines += ["", "> [!WARNING]", f"> WARNING: {warning}"]
+    return lines, warning
+
+
+def write_summary(lines):
+    """Append to the job summary; there is none outside GitHub Actions."""
+    path = os.environ.get("GITHUB_STEP_SUMMARY")
+    if not path:
+        return
+    title = f"{os.environ.get('HARNESS_LINE', '?')} / {os.environ.get('HARNESS_TARGET', '?')}"
+    with Path(path).open("a", encoding="utf-8") as handle:
+        handle.write(f"\n### netbird stop ({title})\n" + "\n".join(lines) + "\n")
+
+
+def test_stop_removes_table_and_wt0(vm, record_property):
     _require_connected()
     # The cleanup is only proved if the objects existed before the stop.
     assert State.nft_table_seen and State.wt0_seen, (
         "table netbird and wt0 were not both seen before the stop"
     )
-    _, _, rc = vm.run("/etc/init.d/netbird stop", timeout=120)
-    assert rc == 0, f"/etc/init.d/netbird stop failed with rc={rc}"
+    assert State.term_timeout == TERM_TIMEOUT, "procd term_timeout was not applied"
+    measured = vm.stop_measured(STOP_TIMEOUT)
+    lines, warning = stop_report(
+        measured["duration_s"], measured["sigkill"], State.term_timeout
+    )
+    log.info(
+        "netbird stop measured: %s",
+        {k: v for k, v in measured.items() if k != "output"},
+    )
+    write_summary(lines)
+    record_property("netbird_stop_duration_s", str(measured["duration_s"]))
+    record_property("netbird_stop_sigkill", str(measured["sigkill"]).lower())
+    record_property("netbird_term_timeout_s", str(State.term_timeout))
+    if warning:
+        log.warning("%s", warning)
+        record_property("netbird_stop_warning", warning)
+
+    assert measured["stop_rc"] == 0, (
+        f"/etc/init.d/netbird stop failed with rc={measured['stop_rc']}:"
+        f" {measured['output']}"
+    )
+    assert measured["duration_s"] is not None, (
+        f"the stop duration was not measured: {measured['output']}"
+    )
+    assert not measured["still_running"], (
+        f"the daemon (pid {measured['pid']}) still runs {STOP_TIMEOUT} s after the stop"
+    )
 
     def cleaned():
         table = vm.has_netbird_table()
@@ -226,6 +322,7 @@ def test_stop_removes_table_and_wt0(vm):
     ok, detail = poll(cleaned, STOP_TIMEOUT)
     assert ok, (
         f"not cleaned up {STOP_TIMEOUT} s after stop: {detail}\n"
+        f"measured: {measured}\n"
         f"netbird processes: {vm.run('pidof netbird')[0]}\n"
         f"daemon log tail:\n{vm.log_tail(10)}\n"
         f"syslog tail:\n{vm.syslog_tail()}\n{vm.diagnostics()}"
