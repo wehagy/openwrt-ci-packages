@@ -35,10 +35,16 @@ package test.
 
 ## Secrets
 
-`secrets: inherit` hands the repository secrets to `test.yml`; only the names
-in `test_secrets` reach the tests, as environment variables of `pytest`
-(`NB_SETUP_KEY` for netbird). Values are never printed; a missing secret is an
-empty variable, so a test can skip with a reason.
+`secrets: inherit` hands the repository secrets to `test.yml`. The names in
+`test_secrets` (`NB_SETUP_KEY` for netbird) are exported as environment
+variables of `pytest`, and no process above `pytest` keeps the JSON with all
+the secrets of this repository in its environment. Values are never printed; a
+missing secret is an empty variable, so a test can skip with a reason.
+
+This is hygiene, not isolation: the tests in `tests_path` are code of this
+repository, and so is the workflow that passes the secrets; a test could read
+anything this repository's own workflow can. Do not put code you do not trust
+in `tests_path`.
 
 The log of the `Run tests` step lists the names of all secrets of this
 repository (`"NAME": "***"`), never their values.
