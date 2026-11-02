@@ -3,7 +3,7 @@
 # QEMU, build its images. Runs on push to feature branches and by hand.
 #
 # While the base branch feat/reusable is not on main, the workflows and the
-# scripts both come from it (`@feat/reusable` and ci_ref: feat/reusable).
+# scripts both come from it (`@main` and ci_ref: main).
 name: ci
 
 on:
@@ -55,9 +55,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
@@ -68,9 +68,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
@@ -79,9 +79,9 @@ jobs:
   # secrets: inherit + test_secrets: the named secrets reach only the tests.
   test-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       source: artifact
@@ -91,9 +91,9 @@ jobs:
 
   test-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}
       source: artifact
@@ -103,16 +103,16 @@ jobs:
 
   image-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
 
   image-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/reusable
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/reusable
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}

@@ -28,8 +28,8 @@ package test.
 
 - Each call passes `ci_ref`: the ref of `wehagy/openwrt-ci` the scripts are
   checked out from. It must equal the ref after `@` in `uses:`. No tags are
-  used. During the development of the base both are `feat/reusable`; once the
-  base is on `main` they become `main`.
+  used. Both are `main` (`ci_ref` defaults to `main` in the base; it is kept
+  explicit so that it visibly matches `@main`).
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
   `caller: wehagy/openwrt-ci-packages run commit <sha>, checkout HEAD <sha>`.
 
