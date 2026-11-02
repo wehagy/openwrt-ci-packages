@@ -198,9 +198,9 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 | Job | What it does |
 |---|---|
 | `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for the two branches and for pull requests (any state) of that version. Read only. Branches without an open pull request are orphans: the job fails (see "Orphan branches"). |
-| `prepare` | token job 1. Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. It first proves that the token can push and open pull requests (`scripts/check-token.sh`). A failure or cancellation after the first push deletes the branches this run created. |
-| `build-*`, `test-*`, `image-*` | the base, for both lines, with `feed_repository` = review repository and `feed_ref` = the SHA of the update branch. No secrets. |
-| `publish` | token job 2. Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description has a section "Test suites that ran": the generic QEMU test ran; the package runtime tests (`packages/netbird/tests`) are `NOT RUN` when the directory does not exist, and run without secrets (tests that need `NB_SETUP_KEY` skip) when it does; a green QEMU test never reads as a runtime pass. |
+| `prepare` | token job 1 (`environment: review`). Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. It first proves that the token can push and open pull requests (`scripts/check-token.sh`). A failure or cancellation after the first push deletes the branches this run created. |
+| `build-*`, `test-*`, `image-*` | the base, for both lines, with `feed_repository` = review repository and `feed_ref` = the SHA of the update branch. `test-*` get `secrets: inherit` and `test_secrets: NB_SETUP_KEY` (not the token, see "Secret `TEST_UPSTREAM_TOKEN`"); build and image jobs get no secrets. |
+| `publish` | token job 2 (`environment: review`). Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description has a section "Test suites that ran": the generic QEMU test ran; the package runtime tests (`packages/netbird/tests`) are `NOT RUN` when the directory does not exist, and run (tests that need `NB_SETUP_KEY` run only when that secret is set, otherwise skip) when it does, with a warning that a skipped test is not a pass; a green QEMU test never reads as a runtime pass. |
 
 - Start: daily at 05:17 UTC (the schedule runs from the default branch only) and
   `workflow_dispatch` with the optional input `version` (`X.Y.Z`, newer than the
@@ -234,10 +234,17 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
   ```
 - Secret `TEST_UPSTREAM_TOKEN`: fine-grained token, owner `wehagy`, only the
   review repository, Contents and Pull requests: read and write. Used only by
-  `prepare` and `publish`; a missing secret, a token that cannot push, or a token that cannot open pull requests fails `prepare` before any build. The pull request right is probed by `POST /pulls` with a head branch that does not exist: a token with Pull requests: write gets 422, one without gets 403, and no pull request is created (only the 422 path was proved against GitHub).
-  The test jobs get no secrets (`secrets: inherit` would hand them the token),
-  so the NetBird runtime tests that need `NB_SETUP_KEY` cannot be added to this
-  workflow as it is.
+  `prepare` and `publish`; a missing secret (create it in the environment `review`), a token that cannot push, or a token that cannot open pull requests fails `prepare` before any build. The pull request right is probed by `POST /pulls` with a head branch that does not exist: a token with Pull requests: write gets 422, one without gets 403, and no pull request is created (only the 422 path was proved against GitHub).
+  The token is an environment secret of the environment `review` of this
+  repository, not a repository secret, and only `prepare` and `publish` declare
+  `environment: review`. `secrets: inherit` passes the repository and
+  organization secrets, never an environment's, and a job that calls a reusable
+  workflow (`uses:`) cannot declare an environment. So the test jobs
+  (`secrets: inherit` plus `test_secrets: NB_SETUP_KEY`, which makes the NetBird
+  runtime tests able to run once `packages/netbird/tests` exists) cannot see
+  the token. A job that runs package code (build, test, image) must never
+  declare `environment: review`. A repository secret of the same name would be
+  passed on by `inherit`: do not create one.
 - The hash is the sha256 of the source archive (`scripts/source-sha256.sh`), not
   `make package/netbird/check FIXUP=1`; `prepare` first checks that the archive
   of the current version hashes to the `PKG_HASH` already in the Makefile, and

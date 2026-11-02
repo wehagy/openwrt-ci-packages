@@ -151,23 +151,27 @@ def upstream_link(args: argparse.Namespace, main_jobs: list[Job]) -> str:
 def tests_section(args: argparse.Namespace) -> list[str]:
     """Which test suites ran, so a skipped suite is never read as a passed one.
 
-    The test jobs of this workflow have no secrets, so the package tests that
-    need one (for NetBird, NB_SETUP_KEY) skip. A green QEMU test is then the
-    generic package test, which proves install and files, not that the program
-    works; the description has to say it.
+    The package tests that need a secret (for NetBird, NB_SETUP_KEY) skip when
+    it is not set, and the run cannot tell. Without package tests a green QEMU
+    test is the generic package test, which proves install and files, not that
+    the program works; the description has to say it.
     """
     directory = f"packages/{args.package}/tests"
     if args.package_tests == "present":
         runtime = (
-            f"ran without secrets (`{directory}`): tests that need a secret "
-            "such as `NB_SETUP_KEY` are skipped, not passed"
+            f"`{directory}` runs in the QEMU jobs; tests that need `NB_SETUP_KEY` "
+            "run only when that secret is set and are skipped otherwise"
+        )
+        caution = (
+            "**A test skipped for lack of a secret is not a pass: check the "
+            "QEMU job logs for skips.**\n"
         )
     else:
         runtime = f"**NOT RUN**: `{directory}` does not exist"
-    caution = (
-        "**A green QEMU test above is the generic test only. It does not show "
-        "that the program works at runtime.**\n"
-    )
+        caution = (
+            "**A green QEMU test above is the generic test only. It does not show "
+            "that the program works at runtime.**\n"
+        )
     return [
         "## Test suites that ran\n",
         "| Suite | Ran |\n|---|---|",

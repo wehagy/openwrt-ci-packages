@@ -166,11 +166,10 @@ class ReportTest(unittest.TestCase):
 
     def test_runtime_tests_without_secrets_are_said_skipped(self) -> None:
         body, _ = self.body(package_tests="present")
-        self.assertIn(
-            "tests that need a secret such as `NB_SETUP_KEY` are skipped", body
-        )
+        self.assertIn("run only when that secret is set and are skipped", body)
         self.assertNotIn("NOT RUN", body)
-        self.assertIn("A green QEMU test above is the generic test only", body)
+        self.assertIn("A test skipped for lack of a secret is not a pass", body)
+        self.assertNotIn("generic test only", body)
 
     def test_suites_come_before_the_results(self) -> None:
         body, _ = self.body()
