@@ -15,6 +15,11 @@
 #      link that opens the upstream pull request by hand; otherwise delete both
 #      branches. CI never writes to openwrt/packages.
 #
+# Failure paths: a run that pushed its branches and then fails or is cancelled
+# deletes them (prepare and publish, see the cleanup steps). A forced
+# cancellation or a lost runner cannot; the next run's detect job then fails
+# with ::error:: on the orphan branches and says how to remove them.
+#
 # The secret TEST_UPSTREAM_TOKEN (fine-grained token, only the review
 # repository, Contents and Pull requests: write) is read by the jobs prepare and
 # publish only. The build, test and image jobs get no secrets (no `secrets:`
@@ -36,6 +41,14 @@ on:
 
 permissions:
   contents: read
+
+# One update run at a time. A second run (the schedule and a manual dispatch)
+# would race the first on the same two branches, and its cleanup could delete
+# the branches of the run still using them. A queued run waits (nothing is
+# cancelled); GitHub keeps one pending run per group, a newer one replaces it.
+concurrency:
+  group: update-netbird
+  cancel-in-progress: false
 
 env:
   COMMIT_NAME: Wesley Gimenes
@@ -141,6 +154,7 @@ jobs:
         env:
           TEST_UPSTREAM_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
           GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+          REVIEW_BRANCH: ${{ needs.detect.outputs.review_branch }}
         run: |
           configured=$(scripts/check-config.sh packages/netbird/config.yml | grep '^review_repository=')
           if [ "${configured}" != "review_repository=${REVIEW_REPOSITORY}" ]; then
@@ -151,12 +165,9 @@ jobs:
             echo "::error::the secret TEST_UPSTREAM_TOKEN is not set in this repository: create a fine-grained token (owner wehagy, only the review repository, Contents and Pull requests: read and write) and store it as that secret"
             exit 1
           fi
-          push=$(gh api "repos/${REVIEW_REPOSITORY}" --jq .permissions.push)
-          if [ "${push}" != true ]; then
-            echo "::error::TEST_UPSTREAM_TOKEN cannot push to ${REVIEW_REPOSITORY}"
-            exit 1
-          fi
-          echo "TEST_UPSTREAM_TOKEN is set and can push to ${REVIEW_REPOSITORY}"
+          # Push and pull request rights, the latter by a probe that cannot
+          # create a pull request (scripts/check-token.sh).
+          PROBE_HEAD="ci/token-probe-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" scripts/check-token.sh
 
       - name: Check out the review repository
         uses: actions/checkout@v7.0.1
@@ -176,7 +187,25 @@ jobs:
           TARGET_VERSION: ${{ needs.detect.outputs.target }}
           BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
           UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+          OWNED_MARKER: ${{ runner.temp }}/branches-created
         run: scripts/prepare-branches.sh | tee -a "${GITHUB_OUTPUT}"
+
+      # Any failure or cancellation after the first push (the marker): the
+      # branches belong to this run, delete them. Without the marker nothing was
+      # pushed, and a branch that exists is someone else's: left alone.
+      - name: Delete the branches this run created, if it failed
+        if: ${{ failure() || cancelled() }}
+        env:
+          GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+          UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+          OWNED_MARKER: ${{ runner.temp }}/branches-created
+        run: |
+          if [ -e "${OWNED_MARKER}" ]; then
+            scripts/discard-branches.sh
+          else
+            echo "no branch was pushed by this run: nothing to delete"
+          fi
 
       - name: Summary
         env:
@@ -380,6 +409,7 @@ jobs:
           echo "open=${open}" >>"${GITHUB_OUTPUT}"
 
       - name: Open the draft pull request
+        id: open_pr
         if: ${{ steps.decide.outputs.open == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
@@ -391,10 +421,16 @@ jobs:
           echo "### Pull request" >>"${GITHUB_STEP_SUMMARY}"
           echo "${url}" >>"${GITHUB_STEP_SUMMARY}"
 
-      - name: Line main failed, delete the two branches
-        if: ${{ steps.decide.outputs.open != 'true' }}
+      # Every way out except an opened pull request ends here: line main did
+      # not pass, the description or the decision failed, the pull request
+      # could not be opened, the run was cancelled. always() makes it run in all
+      # of them; discard-branches.sh itself leaves alone the branches of an open
+      # pull request. A forced cancellation or a lost runner cannot run this:
+      # the next `detect` then fails on the orphan branches (README.md).
+      - name: Delete the two branches unless a pull request was opened
+        if: ${{ always() && steps.open_pr.outcome != 'success' }}
         env:
           GH_TOKEN: ${{ secrets.TEST_UPSTREAM_TOKEN }}
         run: |
           scripts/discard-branches.sh | tee -a "${GITHUB_STEP_SUMMARY}"
-          echo "::notice::line main did not pass: no pull request was opened and the branches were deleted from ${REVIEW_REPOSITORY}"
+          echo "::notice::this run opened no pull request; the branches of ${UPDATE_BRANCH} are handled as printed above"

@@ -145,16 +145,54 @@ gh_fixtures v0.81.4
 run_plan 0.82.0
 check "plan: a forced version wins over the release" "${work}/plan.out" has "${work}/plan.out" needed=true
 
+# Branches with an open pull request: a run in progress or done; not an error.
+gh_fixtures v0.82.0
+printf '%s\n%s\n' "${base_branch}" "${update_branch}" >"${STUB_GH_DIR}/branches"
+printf '%s open\n' "${update_branch}" >"${STUB_GH_DIR}/prs"
+run_plan ""
+check "plan: branches with an open pull request: not needed" "${work}/plan.out" has "${work}/plan.out" needed=false
+check "plan: branches with an open pull request exit 0" "exit ${plan_rc}" same "${plan_rc}" 0
+check "plan: branches with an open pull request say so" "${work}/plan.out" has "${work}/plan.out" "with an open pull request"
+
+# Orphans: branches without an open pull request fail the job, loudly.
+gh_fixtures v0.82.0
+printf '%s\n%s\n' "${base_branch}" "${update_branch}" >"${STUB_GH_DIR}/branches"
+run_plan ""
+check "plan: orphan branches fail" "exit ${plan_rc}" same "${plan_rc}" 1
+check "plan: orphan branches raise an ::error::" "${work}/plan.err" has "${work}/plan.err" "::error::orphan branches in wehagy/w"
+check "plan: orphan branches name the update branch" "${work}/plan.err" has "${work}/plan.err" "${update_branch}"
+check "plan: orphan branches name the base branch" "${work}/plan.err" has "${work}/plan.err" "${base_branch}"
+check "plan: orphan branches say how to delete them" "${work}/plan.err" has "${work}/plan.err" "gh api --method DELETE repos/wehagy/w/git/refs/heads/${update_branch}"
+check "plan: orphan branches print no output line" "${work}/plan.out" empty "${work}/plan.out"
+
 gh_fixtures v0.82.0
 printf '%s\n' "${update_branch}" >"${STUB_GH_DIR}/branches"
 run_plan ""
-check "plan: the update branch exists: not needed" "${work}/plan.out" has "${work}/plan.out" needed=false
+check "plan: an orphan update branch alone fails" "exit ${plan_rc}" same "${plan_rc}" 1
+
+gh_fixtures v0.82.0
+printf '%s\n' "${base_branch}" >"${STUB_GH_DIR}/branches"
+run_plan ""
+check "plan: an orphan base branch alone fails" "exit ${plan_rc}" same "${plan_rc}" 1
+check "plan: an orphan base branch is named" "${work}/plan.err" has "${work}/plan.err" "${base_branch}"
+
+gh_fixtures v0.82.0
+printf '%s\n%s\n' "${base_branch}" "${update_branch}" >"${STUB_GH_DIR}/branches"
+printf '%s closed\n' "${update_branch}" >"${STUB_GH_DIR}/prs"
+run_plan ""
+check "plan: branches left behind by a closed pull request fail" "exit ${plan_rc}" same "${plan_rc}" 1
 
 gh_fixtures v0.82.0
 printf '%s closed\n' "${update_branch}" >"${STUB_GH_DIR}/prs"
 run_plan ""
-check "plan: a closed pull request: not needed" "${work}/plan.out" has "${work}/plan.out" needed=false
-check "plan: a closed pull request exits 0" "exit ${plan_rc}" same "${plan_rc}" 0
+check "plan: a closed pull request and no branch: not needed" "${work}/plan.out" has "${work}/plan.out" needed=false
+check "plan: a closed pull request and no branch exits 0" "exit ${plan_rc}" same "${plan_rc}" 0
+
+# The review repository is not older than the target: no look at the branches.
+gh_fixtures v0.81.4
+printf '%s\n' "${update_branch}" >"${STUB_GH_DIR}/branches"
+run_plan ""
+check "plan: same version with a stray branch: not needed" "${work}/plan.out" has "${work}/plan.out" needed=false
 
 # A hostile tag is refused and never echoed.
 gh_fixtures "v0.82.0
@@ -168,7 +206,7 @@ check "plan: a hostile tag prints no output line" "${work}/plan.out" empty "${wo
 # A fresh bare repository (the review repository) with the package at
 # ${current_version} on master, cloned into review/ with the GitHub URL.
 fresh_review() {
-	rm -rf "${work}/origin.git" "${work}/review" "${work}/seed"
+	rm -rf "${work}/origin.git" "${work}/review" "${work}/seed" "${work}/owned"
 	"${STUB_REAL_GIT}" init -q --bare -b master "${work}/origin.git"
 	"${STUB_REAL_GIT}" init -q -b master "${work}/seed"
 	mkdir -p "${work}/seed/net/netbird"
@@ -191,7 +229,7 @@ run_prepare() {
 			UPSTREAM_REPOSITORY=netbirdio/netbird TARGET_VERSION=0.82.0 \
 			BASE_BRANCH="${base_branch}" UPDATE_BRANCH="${update_branch}" \
 			COMMIT_NAME="Test Author" COMMIT_EMAIL=author@example.invalid \
-			"${script_dir}/prepare-branches.sh"
+			OWNED_MARKER="${work}/owned" "${script_dir}/prepare-branches.sh"
 	) >"${work}/prep.out" 2>"${work}/prep.err" || prep_rc=$?
 }
 
@@ -237,6 +275,7 @@ bare_log "${update_branch}" %B >"${work}/message"
 check "prepare: the commit is signed off" "${work}/message" has "${work}/message" "Signed-off-by: Test Author <author@example.invalid>"
 got=$(bare_log "${update_branch}" %H)
 check "prepare: prints the sha of the update commit" "${work}/prep.out" has "${work}/prep.out" "sha=${got}"
+check "prepare: marks the branches as created by this run" "missing" test -e "${work}/owned"
 check "prepare: downloads the current and the target archive" "${STUB_LOG}" has "${STUB_LOG}" "v0.82.0"
 
 # A branch of another run is never overwritten, even at the same commit.
@@ -246,6 +285,7 @@ run_prepare
 check "prepare: refuses an existing base branch" "exit ${prep_rc}" same "${prep_rc}" 1
 check "prepare: names the existing branch" "${work}/prep.err" has "${work}/prep.err" "already exists"
 check "prepare: pushes no update branch after refusing" "pushed" bare_lacks "${update_branch}"
+check "prepare: does not mark branches it did not create" "marker exists" test ! -e "${work}/owned"
 
 fresh_review
 "${STUB_REAL_GIT}" -C "${work}/review" push -q origin "${start_sha}:refs/heads/${update_branch}"
@@ -264,6 +304,7 @@ run_prepare
 check "prepare: a hash method that does not match fails" "exit ${prep_rc}" same "${prep_rc}" 1
 check "prepare: says the method check failed" "${work}/prep.err" has "${work}/prep.err" "hash method check failed"
 check "prepare: pushes nothing when the method check fails" "pushed" bare_lacks "${base_branch}"
+check "prepare: no marker when the method check fails" "marker exists" test ! -e "${work}/owned"
 
 fresh_review
 STUB_CURL_EXIT=22 run_prepare
@@ -294,6 +335,7 @@ chmod +x "${work}/origin.git/hooks/pre-receive"
 run_prepare
 check "prepare: a rejected update push fails" "exit ${prep_rc}" same "${prep_rc}" 1
 check "prepare: removes the base branch again" "still there" bare_lacks "${base_branch}"
+check "prepare: marks the branches when the update push fails" "missing" test -e "${work}/owned"
 check "prepare: says the base was removed" "${work}/prep.err" has "${work}/prep.err" "was removed again"
 
 # --- open-pr.sh -------------------------------------------------------------
@@ -359,6 +401,16 @@ run_discard wehagy/w
 check "discard: no branch: exits 0" "${work}/dis.err" same "${dis_rc}" 0
 check "discard: no branch: says so" "${work}/dis.out" has "${work}/dis.out" "does not exist"
 
+# An open pull request: deleting its head branch would close it.
+gh_fixtures v0.82.0
+printf '%s\n%s\n' "${update_branch}" "${base_branch}" >"${STUB_GH_DIR}/branches"
+printf '%s open\n' "${update_branch}" >"${STUB_GH_DIR}/prs"
+run_discard wehagy/w
+check "discard: an open pull request: exits 0" "exit ${dis_rc}" same "${dis_rc}" 0
+check "discard: an open pull request: deletes nothing" "${STUB_LOG}" lacks "${STUB_LOG}" "DELETE"
+check "discard: an open pull request: the branches stay" "${STUB_GH_DIR}/branches" has "${STUB_GH_DIR}/branches" "${update_branch}"
+check "discard: an open pull request: says so" "${work}/dis.out" has "${work}/dis.out" "the branches stay"
+
 gh_fixtures v0.82.0
 printf '%s\n' "${update_branch}" >"${STUB_GH_DIR}/branches"
 : >"${STUB_GH_DIR}/delete_fail"
@@ -377,5 +429,51 @@ gh_fixtures v0.82.0
 run_discard openwrt/packages
 check "discard: refuses openwrt/packages" "exit ${dis_rc}" same "${dis_rc}" 1
 check "discard: calls gh not at all for openwrt/packages" "${STUB_LOG}" empty "${STUB_LOG}"
+
+# --- check-token.sh ---------------------------------------------------------
+# Run check-token.sh; sets tok_rc and tok.out / tok.err.
+#
+# Arguments:
+#   $1  REVIEW_REPOSITORY
+run_token() {
+	tok_rc=0
+	REVIEW_REPOSITORY=$1 REVIEW_BRANCH=master PROBE_HEAD=ci/token-probe-1-1 \
+		"${script_dir}/check-token.sh" >"${work}/tok.out" 2>"${work}/tok.err" || tok_rc=$?
+}
+
+gh_fixtures v0.82.0
+run_token wehagy/w
+check "token: push and pull request rights: exits 0" "${work}/tok.err" same "${tok_rc}" 0
+check "token: push and pull request rights: says so" "${work}/tok.out" has "${work}/tok.out" "can push to and open pull requests"
+check "token: probes with POST pulls" "${STUB_LOG}" has "${STUB_LOG}" "api --method POST repos/wehagy/w/pulls"
+
+gh_fixtures v0.82.0
+printf '403\n' >"${STUB_GH_DIR}/probe_status"
+run_token wehagy/w
+check "token: no pull request right: fails" "exit ${tok_rc}" same "${tok_rc}" 1
+check "token: no pull request right: says what to grant" "${work}/tok.err" has "${work}/tok.err" "cannot open pull requests"
+
+gh_fixtures v0.82.0
+printf '500\n' >"${STUB_GH_DIR}/probe_status"
+run_token wehagy/w
+check "token: an unexpected answer fails" "exit ${tok_rc}" same "${tok_rc}" 1
+
+gh_fixtures v0.82.0
+printf 'false\n' >"${STUB_GH_DIR}/permissions"
+run_token wehagy/w
+check "token: no push right: fails" "exit ${tok_rc}" same "${tok_rc}" 1
+check "token: no push right: does not probe" "${STUB_LOG}" lacks "${STUB_LOG}" "POST"
+
+gh_fixtures v0.82.0
+printf 'ci/token-probe-1-1\n' >"${STUB_GH_DIR}/branches"
+run_token wehagy/w
+check "token: an existing probe branch fails" "exit ${tok_rc}" same "${tok_rc}" 1
+check "token: an existing probe branch says why" "${work}/tok.err" has "${work}/tok.err" "exists: not probing"
+check "token: an existing probe branch is never probed" "${STUB_LOG}" lacks "${STUB_LOG}" "POST"
+
+gh_fixtures v0.82.0
+run_token openwrt/packages
+check "token: refuses openwrt/packages" "exit ${tok_rc}" same "${tok_rc}" 1
+check "token: calls gh not at all for openwrt/packages" "${STUB_LOG}" empty "${STUB_LOG}"
 
 finish

@@ -197,10 +197,10 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 
 | Job | What it does |
 |---|---|
-| `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for an existing branch or pull request (any state) of that version. Read only. |
-| `prepare` | token job 1. Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. |
+| `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for the two branches and for pull requests (any state) of that version. Read only. Branches without an open pull request are orphans: the job fails (see "Orphan branches"). |
+| `prepare` | token job 1. Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. It first proves that the token can push and open pull requests (`scripts/check-token.sh`). A failure or cancellation after the first push deletes the branches this run created. |
 | `build-*`, `test-*`, `image-*` | the base, for both lines, with `feed_repository` = review repository and `feed_ref` = the SHA of the update branch. No secrets. |
-| `publish` | token job 2. Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise deletes both branches. Line `25.12` may fail; the description says so. The description has a section "Test suites that ran": the generic QEMU test ran; the package runtime tests (`packages/netbird/tests`) are `NOT RUN` when the directory does not exist, and run without secrets (tests that need `NB_SETUP_KEY` skip) when it does; a green QEMU test never reads as a runtime pass. |
+| `publish` | token job 2. Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description has a section "Test suites that ran": the generic QEMU test ran; the package runtime tests (`packages/netbird/tests`) are `NOT RUN` when the directory does not exist, and run without secrets (tests that need `NB_SETUP_KEY` skip) when it does; a green QEMU test never reads as a runtime pass. |
 
 - Start: daily at 05:17 UTC (the schedule runs from the default branch only) and
   `workflow_dispatch` with the optional input `version` (`X.Y.Z`, newer than the
@@ -217,9 +217,24 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
   work. Production: `review_repository: wehagy/packages` (the fork); do this
   only with the owner's approval, with a token for that repository. For a fork
   the description links `.../openwrt/packages/compare/master...<owner>:<repo>:<branch>?expand=1&title=...&body=...`.
+- One run at a time: `concurrency` group `update-netbird`, `cancel-in-progress:
+  false`. A second run (the schedule and a manual dispatch) waits; GitHub keeps
+  one pending run per group, so a newer pending run replaces the older one.
+- Orphan branches: `ci/netbird-base-X.Y.Z` or `ci/netbird-update-X.Y.Z` in the
+  review repository without an open pull request, left by a run that was killed
+  (forced cancellation, lost runner, timeout) before its cleanup. `detect` does
+  not stay green: it fails with an `::error::` that names the branches and the
+  commands, and no update runs until they are removed. Recovery: delete each
+  branch, then run again (a closed pull request of that version still stops a
+  new one, which is intended):
+
+  ```
+  gh api --method DELETE repos/<review repository>/git/refs/heads/ci/netbird-base-X.Y.Z
+  gh api --method DELETE repos/<review repository>/git/refs/heads/ci/netbird-update-X.Y.Z
+  ```
 - Secret `TEST_UPSTREAM_TOKEN`: fine-grained token, owner `wehagy`, only the
   review repository, Contents and Pull requests: read and write. Used only by
-  `prepare` and `publish`; a missing secret fails `prepare` before any build.
+  `prepare` and `publish`; a missing secret, a token that cannot push, or a token that cannot open pull requests fails `prepare` before any build. The pull request right is probed by `POST /pulls` with a head branch that does not exist: a token with Pull requests: write gets 422, one without gets 403, and no pull request is created (only the 422 path was proved against GitHub).
   The test jobs get no secrets (`secrets: inherit` would hand them the token),
   so the NetBird runtime tests that need `NB_SETUP_KEY` cannot be added to this
   workflow as it is.

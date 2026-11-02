@@ -6,6 +6,9 @@
 # to repeat work: no run when the review repository is not older than the
 # target, or when the update branch exists or has ever had a pull request there
 # (open, closed or merged: a closed one is a rejection and is not reopened).
+# A branch of the bump (base or update) that exists WITHOUT an open pull request
+# is an orphan of a failed or cancelled run: the script prints an ::error::
+# annotation naming the branches and the commands that remove them, and fails.
 # Read only. Prints KEY=value lines (safe for $GITHUB_OUTPUT) and logs to stderr.
 #
 # Usage:
@@ -66,23 +69,41 @@ order=$(version_cmp "${target}" "${current}")
 if [ "${order}" != gt ]; then
 	reason="the review repository has ${current}, not older than ${target}"
 else
-	branch_rc=0
-	branch_out=$(gh api "repos/${REVIEW_REPOSITORY}/branches/${update_branch}" --jq .name 2>&1) || branch_rc=$?
-	if [ "${branch_rc}" -eq 0 ]; then
-		reason="branch ${update_branch} already exists in ${REVIEW_REPOSITORY}"
-	else
+	# Both branches of a bump: whichever exists was left by a run (see the
+	# orphan case below), or belongs to an open pull request.
+	found=
+	delete_cmds=
+	for branch in "${base_branch}" "${update_branch}"; do
+		branch_rc=0
+		branch_out=$(gh api "repos/${REVIEW_REPOSITORY}/branches/${branch}" --jq .name 2>&1) || branch_rc=$?
+		if [ "${branch_rc}" -eq 0 ]; then
+			found="${found} ${branch}"
+			delete_cmds="${delete_cmds} gh api --method DELETE repos/${REVIEW_REPOSITORY}/git/refs/heads/${branch};"
+			continue
+		fi
 		case "${branch_out}" in
 		*'HTTP 404'*) ;;
-		*) die "cannot look for branch ${update_branch}: ${branch_out}" ;;
+		*) die "cannot look for branch ${branch}: ${branch_out}" ;;
 		esac
-		prs=$(gh pr list --repo "${REVIEW_REPOSITORY}" --head "${update_branch}" --state all \
-			--json number --jq length) || die "cannot list the pull requests of ${REVIEW_REPOSITORY}"
-		if [ "${prs}" -gt 0 ]; then
-			reason="${prs} pull request(s) of ${update_branch} already exist in ${REVIEW_REPOSITORY}"
-		else
-			needed=true
-			reason="${PACKAGE} ${current} -> ${target} (${origin})"
-		fi
+	done
+	open_prs=$(gh pr list --repo "${REVIEW_REPOSITORY}" --head "${update_branch}" --state open \
+		--json number --jq length) || die "cannot list the pull requests of ${REVIEW_REPOSITORY}"
+	all_prs=$(gh pr list --repo "${REVIEW_REPOSITORY}" --head "${update_branch}" --state all \
+		--json number --jq length) || die "cannot list the pull requests of ${REVIEW_REPOSITORY}"
+	if [ -n "${found}" ] && [ "${open_prs}" -eq 0 ]; then
+		# Orphan: a run that failed or was cancelled before its pull request
+		# left the branches behind. Staying green would hide the update for
+		# good, so the job fails and says how to remove them.
+		printf '::error::orphan branches in %s without an open pull request:%s. A failed or cancelled run left them, and no update runs while they exist. Delete them, then run again:%s\n' \
+			"${REVIEW_REPOSITORY}" "${found}" "${delete_cmds}" >&2
+		die "orphan branches of ${PACKAGE} ${target} in ${REVIEW_REPOSITORY}:${found}"
+	elif [ -n "${found}" ]; then
+		reason="branch(es)${found} exist in ${REVIEW_REPOSITORY} with an open pull request"
+	elif [ "${all_prs}" -gt 0 ]; then
+		reason="${all_prs} pull request(s) of ${update_branch} already exist in ${REVIEW_REPOSITORY}"
+	else
+		needed=true
+		reason="${PACKAGE} ${current} -> ${target} (${origin})"
 	fi
 fi
 

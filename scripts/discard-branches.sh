@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 # Responsibility: delete the two branches of a bump from the review repository
-# when no pull request is opened for them, and check that both are gone. A
+# unless a pull request of the update branch is open (it is then left alone,
+# exit 0), and check that both are gone. A
 # branch that does not exist is fine (it was never pushed). Only the exact
 # names given are touched, in REVIEW_REPOSITORY, after check_review_repository.
 #
@@ -23,6 +24,14 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 check_review_repository "${REVIEW_REPOSITORY}"
 check_branch "${BASE_BRANCH}"
 check_branch "${UPDATE_BRANCH}"
+
+# Deleting the head branch of an open pull request closes it: never do that.
+open_prs=$(gh pr list --repo "${REVIEW_REPOSITORY}" --head "${UPDATE_BRANCH}" --state open \
+	--json number --jq length) || die "cannot list the pull requests of ${REVIEW_REPOSITORY}"
+if [ "${open_prs}" -gt 0 ]; then
+	printf 'a pull request of %s is open: the branches stay\n' "${UPDATE_BRANCH}"
+	exit 0
+fi
 
 for branch in "${UPDATE_BRANCH}" "${BASE_BRANCH}"; do
 	rc=0

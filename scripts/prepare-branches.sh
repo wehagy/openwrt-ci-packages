@@ -20,6 +20,7 @@
 #   TARGET_VERSION       version to bump to
 #   BASE_BRANCH, UPDATE_BRANCH  branches to create
 #   COMMIT_NAME, COMMIT_EMAIL   author, committer and Signed-off-by
+#   OWNED_MARKER         optional; a file created right before the first push
 
 set -eu
 
@@ -96,6 +97,12 @@ head_sha=$(git rev-parse HEAD)
 parent_sha=$(git rev-parse HEAD^)
 [ "${parent_sha}" = "${base_sha}" ] || die "the bump commit is not on top of the starting point"
 
+# From here on a failure or a cancellation may leave branches that only this run
+# created (neither existed above): the marker tells the cleanup step of the
+# workflow that discarding them is safe.
+if [ -n "${OWNED_MARKER:-}" ]; then
+	: >"${OWNED_MARKER}"
+fi
 git push origin "${base_sha}:refs/heads/${BASE_BRANCH}" >&2
 if ! git push origin "${head_sha}:refs/heads/${UPDATE_BRANCH}" >&2; then
 	git push origin --delete "${BASE_BRANCH}" >&2
