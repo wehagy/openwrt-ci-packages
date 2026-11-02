@@ -224,4 +224,7 @@ def test_stop_removes_table_and_wt0(vm):
         )
 
     ok, detail = poll(cleaned, STOP_TIMEOUT)
-    assert ok, f"not cleaned up {STOP_TIMEOUT} s after stop: {detail}"
+    assert ok, (
+        f"not cleaned up {STOP_TIMEOUT} s after stop: {detail}\n"
+        f"netbird processes: {vm.run('pidof netbird')[0]}\n{vm.log_tail(40)}"
+    )
