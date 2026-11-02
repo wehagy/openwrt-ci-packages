@@ -2,8 +2,8 @@
 # repository (packages/<name>/config.yml): build both lines, test each build in
 # QEMU, build its images. Runs on push to feature branches and by hand.
 #
-# While the base branch feat/reusable is not on main, the workflows and the
-# scripts both come from it (`@main` and ci_ref: main).
+# The workflows and the scripts both come from the base main (`@main` and
+# ci_ref: main; ci_ref defaults to main, it is kept explicit to match `@main`).
 name: ci
 
 on:
