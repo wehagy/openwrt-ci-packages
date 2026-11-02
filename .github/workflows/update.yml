@@ -193,8 +193,23 @@ jobs:
           OWNED_MARKER: ${{ runner.temp }}/branches-created
         run: scripts/prepare-branches.sh | tee -a "${GITHUB_OUTPUT}"
 
-      # Any failure or cancellation after the first push (the marker): the
-      # branches belong to this run, delete them. Without the marker nothing was
+      - name: Summary
+        env:
+          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
+          UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
+          BASE_SHA: ${{ steps.branches.outputs.base_sha }}
+          SHA: ${{ steps.branches.outputs.sha }}
+        run: |
+          {
+            echo "### Branches pushed to \`${REVIEW_REPOSITORY}\`"
+            echo
+            echo "- base: \`${BASE_BRANCH}\` @ \`${BASE_SHA}\`"
+            echo "- update: \`${UPDATE_BRANCH}\` @ \`${SHA}\`"
+          } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+      # The last step of the job, so that a failure or a cancellation of any
+      # step before it is covered. After the first push (the marker) the
+      # branches belong to this run: delete them. Without the marker nothing was
       # pushed, and a branch that exists is someone else's: left alone.
       - name: Delete the branches this run created, if it failed
         if: ${{ failure() || cancelled() }}
@@ -209,20 +224,6 @@ jobs:
           else
             echo "no branch was pushed by this run: nothing to delete"
           fi
-
-      - name: Summary
-        env:
-          BASE_BRANCH: ${{ needs.detect.outputs.base_branch }}
-          UPDATE_BRANCH: ${{ needs.detect.outputs.update_branch }}
-          BASE_SHA: ${{ steps.branches.outputs.base_sha }}
-          SHA: ${{ steps.branches.outputs.sha }}
-        run: |
-          {
-            echo "### Branches pushed to \`${REVIEW_REPOSITORY}\`"
-            echo
-            echo "- base: \`${BASE_BRANCH}\` @ \`${BASE_SHA}\`"
-            echo "- update: \`${UPDATE_BRANCH}\` @ \`${SHA}\`"
-          } | tee -a "${GITHUB_STEP_SUMMARY}"
 
   # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
   # packages: write (see README.md). feed_ref is the commit of the update
