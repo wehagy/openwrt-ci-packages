@@ -15,6 +15,10 @@ package test.
   The directory does not exist yet for `netbird`: runtime tests are pending.
 - `.github/workflows/ci.yml`: calls the base for `netbird` on push to
   `feat/**` and on `workflow_dispatch` (`refresh_sdk`, `lines`).
+- `.github/workflows/upstream-pr.yml`: tests a pull request of `openwrt/packages`
+  by number, `workflow_dispatch` only (see "Testing an upstream pull request").
+- `scripts/upstream-pr/`: its shell (`lib.sh`, `resolve.sh`, `compose.sh`) and
+  `selftest.sh`, which the workflow runs first.
 - `.github/actionlint.yaml`: declares the `ubuntu-26.04` label for actionlint.
 
 ## How `ci.yml` uses the base
@@ -32,6 +36,37 @@ package test.
   explicit so that it visibly matches `@main`).
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
   `caller: wehagy/openwrt-ci-packages run commit <sha>, checkout HEAD <sha>`.
+
+## Testing an upstream pull request (`upstream-pr.yml`)
+
+Run by hand with `pr_number` (digits only, at most 7, no leading zero; optional
+`refresh_sdk`). It never writes to `openwrt/packages` (a `GET`, a `git fetch`).
+
+1. `resolve` (self-test first): the PR's base branch gives the line (`master`:
+   `main`, `openwrt-25.12`: `25.12`; any other base fails with `unsupported
+   base branch`). The changed packages are the directories that hold a changed
+   path and have a `Makefile` in the PR tree (the shallowest one, so `src/Makefile`
+   belongs to its package); renames count at both paths. A PR with no package
+   or with more than 5 fails; a package the PR only removes has no `Makefile`
+   and is not tested. The job summary lists them.
+2. Every changed package: `build.yml` on `feed_repository: openwrt/packages`,
+   `feed_ref: refs/pull/<n>/head`, then `test.yml` (generic test; a package
+   with `packages/<name>/` also gets its `tests/` and `test_secrets` from
+   `config.yml`).
+3. Packages with `packages/<name>/` here: also `images.yml`, and the whole
+   pipeline again on the other line. The base builds one repository and ref, so
+   `compose` pushes `upstream-overlay/pr<n>-<run id>-<attempt>` to this
+   repository: the other line's `openwrt/packages` branch with the changed
+   directories of the PR copied over it (one root commit, upstream `.github/`
+   dropped); `cleanup` deletes it when the builds are done. Packages without
+   `packages/<name>/` run on the PR's line only.
+4. The base is called at `@feat/feed-source` with `ci_ref: feat/feed-source`
+   (the branch that adds `feed_repository` and `feed_ref`); both change to `main`
+   when it is integrated.
+
+Limits: `test_secrets` is read from `packages/<name>/config.yml` here, while
+`ci.yml` still names `NB_SETUP_KEY` itself. One failed build of a package skips
+the test jobs of all packages of that line (they need the whole matrix).
 
 ## Secrets
 

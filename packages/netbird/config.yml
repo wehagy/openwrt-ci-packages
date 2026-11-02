@@ -5,5 +5,9 @@
 # packages/netbird/tests (see README.md).
 #
 # Keys:
-#   package  name of the package, a directory of openwrt/packages
+#   package       name of the package, a directory of openwrt/packages
+#   test_secrets  optional; names of the secrets its tests receive (space or
+#                 comma separated), read by upstream-pr.yml; ci.yml names the
+#                 same ones in its own test_secrets
 package: netbird
+test_secrets: NB_SETUP_KEY
