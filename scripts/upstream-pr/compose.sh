@@ -13,6 +13,7 @@
 #   PR_NUMBER, OTHER_BRANCH, HEAD_SHA, OVERLAY_DIRS  from the resolve job
 #   TARGET_BRANCH      branch of this repository to push
 #   GITHUB_REPOSITORY  this repository; GH_TOKEN authenticates the push
+#   PUSH_URL           where to push (default https://github.com/$GITHUB_REPOSITORY.git)
 #   GITHUB_OUTPUT, GITHUB_STEP_SUMMARY
 set -eu
 
@@ -81,11 +82,15 @@ for dir in ${OVERLAY_DIRS}; do
 done
 git rm -rq --ignore-unmatch -- .github
 
-git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
-	commit -q -m "overlay of ${OVERLAY_DIRS} from openwrt/packages#${PR_NUMBER} (${HEAD_SHA}) on ${OTHER_BRANCH} (${base_sha})"
-sha=$(git rev-parse HEAD)
+# A root commit: the clone is shallow, so a child of the upstream commit would
+# make the push fail (its parent is missing from the receiving side).
+tree=$(git write-tree)
+sha=$(GIT_AUTHOR_NAME='github-actions[bot]' GIT_COMMITTER_NAME='github-actions[bot]' \
+	GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+	GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
+	git commit-tree -m "overlay of ${OVERLAY_DIRS} from openwrt/packages#${PR_NUMBER} (${HEAD_SHA}) on ${OTHER_BRANCH} (${base_sha})" "${tree}")
 git -c credential.helper='!gh auth git-credential' push -q \
-	"https://github.com/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${TARGET_BRANCH}"
+	"${PUSH_URL:-https://github.com/${GITHUB_REPOSITORY}.git}" "${sha}:refs/heads/${TARGET_BRANCH}"
 
 {
 	echo "branch=${TARGET_BRANCH}"
@@ -97,5 +102,5 @@ git -c credential.helper='!gh auth git-credential' push -q \
 	echo "- ${OTHER_BRANCH} @ ${base_sha} + {${OVERLAY_DIRS}} of ${HEAD_SHA}"
 	echo "- pushed as ${GITHUB_REPOSITORY} ${TARGET_BRANCH} @ ${sha} (deleted by the cleanup job)"
 	echo '- files that differ from the line branch:'
-	git diff --stat "${base_sha}" HEAD | tail -n 12 | sed 's/^/  - /'
+	git diff --stat "${base_sha}" "${sha}" -- . ':!.github' | tail -n 12 | sed 's/^/  - /'
 } | tee -a "${GITHUB_STEP_SUMMARY}"
