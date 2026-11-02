@@ -11,7 +11,8 @@ official client container, same version as the package, same setup key):
   3. ping works in both directions over the NetBird addresses;
   4. the daemon created the nftables table `netbird` and says so in its log;
   5. wt0 is a wireguard link (sysfs DEVTYPE: BusyBox `ip` has no `-d`);
-  6. after `/etc/init.d/netbird stop` the table and wt0 are gone.
+  6. the daemon's memory use is logged and recorded (never required);
+  7. after `/etc/init.d/netbird stop` the table and wt0 are gone.
 
 Environment variables:
   NB_SETUP_KEY             setup key (test_secrets); absent or empty: every
@@ -189,6 +190,20 @@ def test_wt0_is_a_wireguard_link(vm):
     assert "DEVTYPE=wireguard" in devtype, (
         f"wt0 is not a wireguard link (sysfs DEVTYPE):\n{details}\n{devtype}"
     )
+
+
+def test_memory_is_recorded(vm, record_property):
+    """Record the daemon's memory while connected; never required.
+
+    Small routers matter: VmHWM is the peak RSS of the daemon since it
+    started (the VM has connected, answered status calls and pings).
+    """
+    _require_connected()
+    memory = vm.memory_kb()
+    log.info("netbird memory in the VM (kB): %s", memory)
+    for name, value in memory.items():
+        record_property(f"netbird_{name}_kb", str(value))
+    assert "VmRSS" in memory, f"cannot read the daemon memory: {memory}"
 
 
 def test_stop_removes_table_and_wt0(vm):

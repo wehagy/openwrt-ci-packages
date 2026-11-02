@@ -134,12 +134,12 @@ and `nbci-vm-<run id>-<rand>`.
   that test), and a teardown `netbird down` covers a run that failed earlier.
   Ephemeral peers that stay disconnected are deleted by NetBird Cloud after
   its inactivity period.
-- Memory: the x86-64 VM of the base has 128 MB (`harness/targets.yml`), about
-  104 MB usable. The kernel OOM-killed `netbird` there
-  (`Out of memory: Killed process ... (netbird)`), so these tests fail on
-  `x86-64` until the base gives that target more memory (256 MB like the other
-  targets). The tests only free the `.apk` that the generic test leaves in
-  `/tmp` (RAM) before they start the daemon.
+- Memory: `test_memory_is_recorded` logs the daemon's `VmRSS` and `VmHWM` and
+  the VM's `MemAvailable` (junit properties `netbird_*_kb`), never required.
+  The tests free the `.apk` that the generic test leaves in `/tmp` (RAM)
+  before they start the daemon. With the 128 MB x86-64 VM of an earlier base
+  the kernel OOM-killed `netbird` (`Out of memory: Killed process ...
+  (netbird)`); the base now gives that target 256 MB.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
 

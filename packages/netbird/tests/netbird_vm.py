@@ -70,6 +70,20 @@ class Vm:
         )
         return "\n".join(out + err)
 
+    def memory_kb(self):
+        """RSS and peak RSS of the netbird daemon and system memory, in kB."""
+        out, _, _ = self.run(
+            "pid=$(pidof netbird | cut -d' ' -f1);"
+            " grep -E '^(VmRSS|VmHWM):' /proc/$pid/status;"
+            " grep -E '^(MemTotal|MemAvailable):' /proc/meminfo"
+        )
+        values = {}
+        for line in out:
+            match = re.match(r"^(\w+):\s+(\d+)", line)
+            if match:
+                values[match.group(1)] = int(match.group(2))
+        return values
+
     def installed(self):
         _, _, rc = self.run("test -x /usr/bin/netbird")
         return rc == 0
