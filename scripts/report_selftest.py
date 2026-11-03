@@ -65,6 +65,7 @@ def all_jobs(
         records.append(
             {"name": f"lines ({line}) / build / feed {line}", "conclusion": "failure"}
         )
+        records.append({"name": f"lines ({line}) / result", "conclusion": "success"})
         records.append({"name": "detect", "conclusion": "success"})
     return records
 
@@ -458,6 +459,184 @@ class ReportTest(unittest.TestCase):
             with open(os.path.join(stray, "result.json"), "w") as handle:
                 json.dump(dict(result_for("25.12", LINES), package="other"), handle)
             self.assertEqual(report.read_line_results(tmp, "netbird", ["25.12"]), {})
+
+    def write_line_results(self, tmp: str, data_by_line: dict) -> None:
+        """Lay result files out as the download of the artifacts does."""
+        for line, data in data_by_line.items():
+            directory = os.path.join(tmp, f"line-result-netbird-{line}")
+            os.makedirs(directory)
+            with open(os.path.join(directory, "result.json"), "w") as handle:
+                if isinstance(data, str):
+                    handle.write(data)
+                else:
+                    json.dump(data, handle)
+
+    def test_a_hostile_result_file_is_dropped(self) -> None:
+        """The files travel as artifacts: nothing in them is trusted, least of
+        all the text that ends up in the description (feed_sha)."""
+        evil = "[click](http://evil.example) @someone"
+        image = "![x](http://evil.example/p.png) @someone2"
+        hostile = {
+            "main": result_for("main", LINES, feed_sha=evil),
+            "25.12": result_for("25.12", LINES, feed_sha=image),
+            "a": result_for("a", ["a"], feed_sha="b" * 39),
+            "b": result_for("b", ["b"], feed_sha="B" * 40),
+            "c": result_for("c", ["c"], feed_sha="b" * 40 + "\n"),
+            "d": result_for("d", ["d"], feed_sha=["b" * 40]),
+            "e": result_for("e", ["e"], build="[x](http://e.example)"),
+            "f": result_for("f", ["f"], test="success\n# heading"),
+            "g": result_for("g", ["g"], image=None),
+            "h": ["not", "an", "object"],
+            "i": "{not json",
+            "j": "7",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_line_results(tmp, hostile)
+            found = report.read_line_results(tmp, "netbird", list(hostile))
+        self.assertEqual(found, {})
+
+    def test_a_result_file_gives_only_the_fields_that_are_read(self) -> None:
+        data = result_for("main", LINES, extra="@someone", passed=True, build="failure")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_line_results(tmp, {"main": data})
+            found = report.read_line_results(tmp, "netbird", ["main"])
+        self.assertEqual(
+            found["main"],
+            {
+                "line": "main",
+                "package": "netbird",
+                "build": "failure",
+                "test": "success",
+                "image": "success",
+                "feed_sha": "b" * 40,
+                "passed": False,
+            },
+        )
+
+    def test_passed_is_recomputed_from_the_three_results(self) -> None:
+        cases = (
+            ({}, True),
+            ({"image": "not requested"}, True),
+            ({"image": "skipped"}, False),
+            ({"test": "failure"}, False),
+            ({"test": "skipped"}, False),
+            ({"build": "cancelled"}, False),
+        )
+        for override, want in cases:
+            data = result_for("main", LINES, passed=not want, **override)
+            with self.subTest(override=override), tempfile.TemporaryDirectory() as tmp:
+                self.write_line_results(tmp, {"main": data})
+                found = report.read_line_results(tmp, "netbird", ["main"])
+                self.assertIs(found["main"]["passed"], want)
+
+    def test_an_empty_feed_sha_is_a_line_that_was_not_built(self) -> None:
+        data = result_for("main", LINES, build="failure", feed_sha="")
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_line_results(tmp, {"main": data})
+            found = report.read_line_results(tmp, "netbird", ["main"])
+        self.assertEqual(found["main"]["feed_sha"], "")
+
+    def test_the_result_job_of_the_leg_is_required(self) -> None:
+        names = (
+            "lines (main) / result",
+            "lines (main, wehagy/w, " + "b" * 40 + ") / result",
+        )
+        for name in names:
+            with self.subTest(name=name):
+                ok = [{"name": name, "conclusion": "success"}]
+                self.assertTrue(report.result_job_passed(ok, "main"))
+                bad = [{"name": name, "conclusion": "failure"}]
+                self.assertFalse(report.result_job_passed(bad, "main"))
+                self.assertFalse(report.result_job_passed(ok, "25.12"))
+                self.assertFalse(report.result_job_passed(ok, "main2"))
+        self.assertFalse(report.result_job_passed([], "main"))
+        # The line is the first value of the matrix name, not any value.
+        other = [{"name": "lines (25.12, main) / result", "conclusion": "success"}]
+        self.assertFalse(report.result_job_passed(other, "main"))
+        # A job of the same name that did not succeed spoils the line.
+        both = [
+            {"name": "lines (main) / result", "conclusion": "success"},
+            {"name": "lines (main) / result", "conclusion": "failure"},
+        ]
+        self.assertFalse(report.result_job_passed(both, "main"))
+
+    def test_the_secrets_test_job_is_the_test_stage(self) -> None:
+        records = [
+            {
+                "name": "lines (main) / test_secrets / main x86-64",
+                "conclusion": "success",
+            },
+            {"name": "lines (main) / test / main malta-be", "conclusion": "failure"},
+        ]
+        jobs = report.parse_jobs(records, ["main"])
+        self.assertEqual([j.stage for j in jobs], ["test", "test"])
+        self.assertEqual([j.item for j in jobs], ["x86-64", "malta-be"])
+
+    def run_cli(self, mutate=None) -> tuple[str, str]:
+        """Run report.main on the fixtures; mutate(jobs, line_results_dir) may
+        change them first. Returns the printed verdict and the description."""
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_file = os.path.join(tmp, "jobs")
+            records = all_jobs()
+            line_results = os.path.join(tmp, "line-results")
+            self.write_line_results(line_results, all_results())
+            if mutate is not None:
+                records = mutate(records, line_results)
+            with open(jobs_file, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(json.dumps(r) for r in records) + "\n")
+            artifacts = os.path.join(tmp, "artifacts")
+            with open(artifacts, "w", encoding="utf-8") as handle:
+                handle.write("")
+            out = os.path.join(tmp, "out")
+            argv = []
+            for key, value in vars(args_for()).items():
+                if key not in ("line_list", "line_results", "overlays", "results"):
+                    argv += [f"--{key.replace('_', '-')}", value]
+            argv += ["--jobs", jobs_file, "--artifacts", artifacts, "--out", out]
+            argv += ["--results", os.path.join(tmp, "none")]
+            argv += ["--line-results", line_results]
+            argv += ["--overlays", json.dumps(overlays_for(LINES))]
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                self.assertEqual(report.main(argv), 0)
+            with open(out, encoding="utf-8") as handle:
+                return captured.getvalue().strip(), handle.read()
+
+    def test_a_hostile_result_file_never_reaches_the_description(self) -> None:
+        evil = "[click](http://evil.example) @someone"
+        image = "![x](http://evil.example/p.png) @someone2"
+
+        def forge(records, directory):
+            for line, sha in (("main", evil), ("25.12", image)):
+                path = os.path.join(directory, f"line-result-netbird-{line}")
+                with open(os.path.join(path, "result.json"), "w") as handle:
+                    json.dump(result_for(line, LINES, feed_sha=sha), handle)
+            return records
+
+        verdict, body = self.run_cli(forge)
+        self.assertEqual(verdict, "reference_passed=false")
+        for text in ("evil.example", "@someone", "[click]"):
+            self.assertNotIn(text, body)
+        self.assertIn("Result file of the leg: **missing**", body)
+
+    def test_a_result_file_without_its_result_job_is_not_believed(self) -> None:
+        def no_job(records, _directory):
+            return [r for r in records if r["name"] != "lines (main) / result"]
+
+        verdict, body = self.run_cli(no_job)
+        self.assertEqual(verdict, "reference_passed=false")
+        self.assertIn("Result file of the leg: **missing**", body)
+
+        def failed_job(records, _directory):
+            for r in records:
+                if r["name"] == "lines (main) / result":
+                    r["conclusion"] = "failure"
+            return records
+
+        verdict, _ = self.run_cli(failed_job)
+        self.assertEqual(verdict, "reference_passed=false")
+        verdict, _ = self.run_cli()
+        self.assertEqual(verdict, "reference_passed=true")
 
     def test_job_names_do_not_depend_on_the_name_of_the_matrix_job(self) -> None:
         for outer in ("lines (main)", "lines", "lines (netbird, main, pr)"):

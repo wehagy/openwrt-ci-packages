@@ -53,7 +53,16 @@ TARGET_NAME = r"[A-Za-z0-9._-]+"
 # "<line> <item>", so the line is read from there, whatever the caller calls
 # its matrix job. Only the lines of the package match, so that a setup job of
 # the base ("feed <line>", "targets <line>") is not taken for a worker job.
-JOB_NAME = r"^\S+(?: \([^)]*\))? / (build|test|image) / ({lines}) (\S+)$"
+# `test_secrets` is the QEMU test of line.yml that runs with secrets (`test` is
+# the one without): both are the stage "test".
+JOB_NAME = r"^\S+(?: \([^)]*\))? / (build|test|test_secrets|image) / ({lines}) (\S+)$"
+# The job `result` of line.yml, which writes the result file of a leg:
+# "<matrix job> (<line>[, <feed values>]) / result".
+RESULT_JOB_NAME = r"^\S+ \({line}(?:, [^)]*)?\) / result$"
+# What a job of a leg may have ended with (scripts/line-result.sh writes these).
+JOB_RESULTS = ("success", "failure", "cancelled", "skipped", "not requested")
+# A commit the base reports having built: a full SHA, or nothing.
+FEED_SHA = re.compile(r"(?:[0-9a-f]{40})?")
 
 
 @dataclass
@@ -86,7 +95,7 @@ def parse_jobs(records: list[dict], lines: list[str]) -> list[Job]:
             continue
         jobs.append(
             Job(
-                stage=found.group(1),
+                stage="test" if found.group(1) == "test_secrets" else found.group(1),
                 line=found.group(2),
                 item=found.group(3),
                 conclusion=record.get("conclusion") or "unfinished",
@@ -207,18 +216,60 @@ def read_line_results(directory: str, package: str, lines: list[str]) -> dict:
     """The result file of each line: {line: {build, test, image, feed_sha, passed}}.
 
     <directory>/line-result-<package>-<line>/result.json, one artifact per leg
-    of the matrix. A line without a readable file is absent from the result.
+    of the matrix. The files are written by a job of the run but travel as
+    artifacts, so none of their text is trusted: a file that is not a JSON
+    object, names another line or package, has a job result outside
+    JOB_RESULTS or a feed_sha that is not a full SHA (or empty) is dropped as if
+    it was missing, and `passed` is recomputed from the three results. What
+    comes back is only the fields read here, so nothing else reaches the
+    description. A line without a readable file is absent from the result.
     """
     found = {}
     for line in lines:
         path = os.path.join(directory, f"line-result-{package}-{line}", "result.json")
         if not os.path.isfile(path) or os.path.getsize(path) > RESULTS_MAX_BYTES:
             continue
-        with open(path, encoding="utf-8") as handle:
-            data = json.load(handle)
-        if data.get("line") == line and data.get("package") == package:
-            found[line] = data
+        try:
+            with open(path, encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        if not isinstance(data, dict):
+            continue
+        if data.get("line") != line or data.get("package") != package:
+            continue
+        stages = {key: data.get(key) for key in ("build", "test", "image")}
+        feed_sha = data.get("feed_sha", "")
+        if any(value not in JOB_RESULTS for value in stages.values()):
+            continue
+        if not isinstance(feed_sha, str) or FEED_SHA.fullmatch(feed_sha) is None:
+            continue
+        found[line] = {
+            "line": line,
+            "package": package,
+            **stages,
+            "feed_sha": feed_sha,
+            "passed": result_passed(stages),
+        }
     return found
+
+
+def result_passed(stages: dict) -> bool:
+    """Build and test succeeded; the images succeeded or were not requested."""
+    return (
+        stages.get("build") == "success"
+        and stages.get("test") == "success"
+        and stages.get("image") in ("success", "not requested")
+    )
+
+
+def result_job_passed(records: list[dict], line: str) -> bool:
+    """The job `result` of the leg of the line, in the job list of the run,
+    succeeded. Its file is only believed then: an artifact that was there
+    before the job, or that another job uploaded, comes with no such job."""
+    pattern = re.compile(RESULT_JOB_NAME.format(line=re.escape(line)))
+    found = [r for r in records if pattern.match(r.get("name") or "")]
+    return bool(found) and all(r.get("conclusion") == "success" for r in found)
 
 
 def jobs_passed(jobs: list[Job], line: str) -> bool:
@@ -548,10 +599,17 @@ def main(argv: list[str] | None = None) -> int:
     if args.reference not in args.line_list:
         parser.error("--reference is not one of --lines")
     overlays = json.loads(args.overlays)
-    jobs = parse_jobs(read_jsonl(args.jobs), args.line_list)
+    records = read_jsonl(args.jobs)
+    jobs = parse_jobs(records, args.line_list)
     artifacts = {a["name"] for a in read_jsonl(args.artifacts)}
     results = parse_results(args.results, args.package, args.line_list)
-    line_results = read_line_results(args.line_results, args.package, args.line_list)
+    line_results = {
+        line: found
+        for line, found in read_line_results(
+            args.line_results, args.package, args.line_list
+        ).items()
+        if result_job_passed(records, line)
+    }
     with open(args.out, "w", encoding="utf-8") as handle:
         handle.write(build_body(args, jobs, artifacts, results, line_results, overlays))
     passed = line_passed(jobs, args.reference, line_results)
