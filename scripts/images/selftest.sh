@@ -138,6 +138,31 @@ expect_line "config: no apk_timeout means the labgrid default" "apk_timeout=" "$
 expect_line "config: no services_disabled means none" "services_disabled=" "${cfg}" a
 expect_refused "config: service name with a slash" "services_disabled has a character" "${cfg}" g
 expect_refused "config: invalid apk_timeout" "apk_timeout must be whole seconds" "${cfg}" f
+for pair in h:29 i:600 j:601 k:029; do
+	n=${pair%%:*}
+	v=${pair#*:}
+	mkdir -p "${PACKAGES_DIR}/${n}"
+	printf 'package: %s\napk_timeout: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
+done
+expect_refused "config: apk_timeout below 30 s" "apk_timeout must be whole seconds from 30 to 600" "${cfg}" h
+expect_line "config: apk_timeout 600 is the ceiling" "apk_timeout=600" "${cfg}" i
+expect_refused "config: apk_timeout above 600 s" "apk_timeout must be whole seconds from 30 to 600" "${cfg}" j
+expect_refused "config: apk_timeout with a leading zero" "apk_timeout must be whole seconds from 30 to 600" "${cfg}" k
+for pair in m:32M n:64M o:1024M p:1025M q:2048M r:0256M s:256 t:M u:99999M; do
+	n=${pair%%:*}
+	v=${pair#*:}
+	mkdir -p "${PACKAGES_DIR}/${n}"
+	printf 'package: %s\nmemory: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
+done
+expect_refused "config: memory below 64M" "memory must be NNNM from 64M to 1024M" "${cfg}" m
+expect_line "config: memory 64M is the floor" "memory=64M" "${cfg}" n
+expect_line "config: memory 1024M is the ceiling" "memory=1024M" "${cfg}" o
+expect_refused "config: memory above 1024M" "memory must be NNNM from 64M to 1024M" "${cfg}" p
+expect_refused "config: memory 2048M" "memory must be NNNM from 64M to 1024M" "${cfg}" q
+expect_refused "config: memory with a leading zero" "memory must be NNNM from 64M to 1024M" "${cfg}" r
+expect_refused "config: memory without the M" "memory must be NNNM from 64M to 1024M" "${cfg}" s
+expect_refused "config: memory M alone" "memory must be NNNM from 64M to 1024M" "${cfg}" t
+expect_refused "config: memory with five digits" "memory must be NNNM from 64M to 1024M" "${cfg}" u
 expect_refused "config: invalid memory" "memory must be NNNM" "${cfg}" d
 expect_refused "config: newline in a value cannot forge a command" "targets has a character" "${cfg}" e
 

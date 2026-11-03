@@ -67,18 +67,34 @@ for pair in "profiles:${profiles}" "packages:${packages}" "targets:${targets}" "
 	*) ;;
 	esac
 done
-case "${memory}" in
-*[!0-9M]*) die "${config}: memory must be NNNM, e.g. 256M" ;;
-*) ;;
-esac
+# memory and apk_timeout have the ranges of the base (64M to 1024M, 30 to
+# 600 s), so that a wrong value fails here, in the first job, and not after the
+# builds.
+if [ -n "${memory}" ]; then
+	mem_mb=${memory%M}
+	case "${memory}" in
+	*M) ;;
+	*) die "${config}: memory must be NNNM from 64M to 1024M, e.g. 256M" ;;
+	esac
+	case "${mem_mb}" in
+	*[!0-9]* | 0* | '') die "${config}: memory must be NNNM from 64M to 1024M, e.g. 256M" ;;
+	*) ;;
+	esac
+	{ [ "${#mem_mb}" -le 4 ] && [ "${mem_mb}" -ge 64 ] && [ "${mem_mb}" -le 1024 ]; } ||
+		die "${config}: memory must be NNNM from 64M to 1024M, e.g. 256M"
+fi
 case "${services_disabled}" in
 *[!A-Za-z0-9._\ -]*) die "${config}: services_disabled has a character outside [A-Za-z0-9._ -]" ;;
 *) ;;
 esac
-case "${apk_timeout}" in
-*[!0-9]*) die "${config}: apk_timeout must be whole seconds, e.g. 120" ;;
-*) ;;
-esac
+if [ -n "${apk_timeout}" ]; then
+	case "${apk_timeout}" in
+	*[!0-9]* | 0*) die "${config}: apk_timeout must be whole seconds from 30 to 600, e.g. 120" ;;
+	*) ;;
+	esac
+	{ [ "${#apk_timeout}" -le 3 ] && [ "${apk_timeout}" -ge 30 ] && [ "${apk_timeout}" -le 600 ]; } ||
+		die "${config}: apk_timeout must be whole seconds from 30 to 600, e.g. 120"
+fi
 
 printf 'package=%s\n' "${name}"
 printf 'profiles=%s\n' "${profiles}"
