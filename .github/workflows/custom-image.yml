@@ -1,0 +1,317 @@
+# Builds ONE firmware image by hand, from the web form (Actions > custom-image >
+# Run workflow): a configured profile of packages/netbird/config.yml or any
+# other profile of the official profiles.json, with the packages you list
+# (additions and -removals) and, optionally, a package of this repository built
+# from openwrt/packages: from the branch of the line, from a pull request of
+# openwrt/packages, or from a branch of a fork. The images are artifacts and
+# the run summary says what was built from where.
+#
+# Form (see README.md for an example):
+#   line            main or 25.12
+#   profile         a configured profile, or `other` with other_profile
+#   other_profile   <target>/<subtarget>/<profile>, used with `other`
+#   packages        extra packages, -name removes one
+#   package         package of this repository to build and include; empty:
+#                   none
+#   pr_number       optional, a pull request of openwrt/packages. If its base
+#                   branch is the one of the line, its head is built as it is;
+#                   otherwise its changed package directories are overlaid on
+#                   the branch of the line (scripts/upstream-pr/*, the same
+#                   scripts upstream-pr.yml uses)
+#   feed_repository, feed_ref
+#                   advanced: a branch of a fork (e.g. wehagy/packages
+#                   my-branch); excludes pr_number
+#
+# Upstream code is untrusted and no secret reaches it: the jobs have no
+# `secrets:`. Nothing is written to openwrt/packages. The overlay branch of this
+# repository (upstream-overlay/*) is deleted when the build is done.
+#
+# The base is called at `@feat/image-inputs` with `ci_ref: feat/image-inputs`
+# (both must stay equal; TEMPORARY, back to main when the base branch is
+# merged). The profile choices are the profiles of packages/netbird/config.yml
+# (scripts/images/selftest.sh fails if they differ).
+name: custom-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      line:
+        description: OpenWrt line
+        type: choice
+        options: [main, "25.12"]
+        default: main
+      profile:
+        description: Device profile (other - use other_profile)
+        type: choice
+        options:
+          - x86/64/generic
+          - mediatek/filogic/xiaomi_mi-router-ax3000t-ubootmod
+          - mediatek/filogic/acer_predator-w6x-stock
+          - mediatek/filogic/bananapi_bpi-r3
+          - ath79/generic/tplink_archer-c7-v4
+          - ramips/mt7621/totolink_x5000r
+          - ramips/mt7621/glinet_gl-mt1300
+          - ath79/generic/buffalo_wzr-hp-g450h
+          - other
+        default: x86/64/generic
+      other_profile:
+        description: With profile other - target/subtarget/profile, e.g. ipq40xx/generic/glinet_gl-b1300
+        type: string
+        default: ""
+      packages:
+        description: Extra packages, -name removes one, e.g. -dnsmasq dnsmasq-full
+        type: string
+        default: ""
+      package:
+        description: Package of this repository to build and include, e.g. netbird (empty - none)
+        type: string
+        default: ""
+      pr_number:
+        description: Pull request of openwrt/packages to build the package from (digits, empty - none)
+        type: string
+        default: ""
+      feed_repository:
+        description: Advanced - repository of a fork to build the package from, e.g. wehagy/packages
+        type: string
+        default: ""
+      feed_ref:
+        description: Advanced - branch, tag or commit of feed_repository (empty - the branch of the line)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  # Validates the form (and refuses a bad combination) before any build.
+  config:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      line: ${{ steps.form.outputs.line }}
+      profile: ${{ steps.form.outputs.profile }}
+      package: ${{ steps.form.outputs.package }}
+      packages: ${{ steps.form.outputs.packages }}
+      limit: ${{ steps.form.outputs.limit }}
+      source_mode: ${{ steps.form.outputs.source_mode }}
+      pr_number: ${{ steps.form.outputs.pr_number }}
+      feed_repository: ${{ steps.form.outputs.feed_repository }}
+      feed_ref: ${{ steps.form.outputs.feed_ref }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check out the base (its validators)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: feat/image-inputs
+          path: ci-base
+          persist-credentials: false
+
+      - name: Self-test the configuration scripts
+        run: scripts/images/selftest.sh
+
+      - name: Read the form
+        id: form
+        env:
+          LINE: ${{ inputs.line }}
+          PROFILE: ${{ inputs.profile }}
+          OTHER_PROFILE: ${{ inputs.other_profile }}
+          PACKAGES: ${{ inputs.packages }}
+          PACKAGE: ${{ inputs.package }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          FEED_REPOSITORY: ${{ inputs.feed_repository }}
+          FEED_REF: ${{ inputs.feed_ref }}
+        run: scripts/images/custom.sh | tee -a "${GITHUB_OUTPUT}"
+
+      # The rules of the base, so that a bad package list, profile or feed
+      # fails here and not after the build.
+      - name: Validate with the rules of the base
+        env:
+          PROFILE: ${{ steps.form.outputs.profile }}
+          PACKAGES: ${{ steps.form.outputs.packages }}
+          FEED_REPOSITORY: ${{ steps.form.outputs.feed_repository }}
+          FEED_REF: ${{ steps.form.outputs.feed_ref }}
+        run: |
+          . ci-base/scripts/lib/common.sh
+          . ci-base/scripts/lib/image-inputs.sh
+          check_image_packages "${PACKAGES}"
+          profile_tokens "${PROFILE}" >/dev/null
+          if [ -n "${FEED_REPOSITORY}" ]; then check_feed_repository "${FEED_REPOSITORY}"; fi
+          if [ -n "${FEED_REF}" ]; then check_feed_ref "${FEED_REF}"; fi
+
+  # The pull request: what it changes and how it reaches the chosen line.
+  source:
+    if: ${{ needs.config.outputs.pr_number != '' }}
+    needs: config
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      overlay: ${{ steps.decide.outputs.overlay }}
+      feed_repository: ${{ steps.decide.outputs.feed_repository }}
+      feed_ref: ${{ steps.decide.outputs.feed_ref }}
+      base_branch: ${{ steps.decide.outputs.base_branch }}
+      head_sha: ${{ steps.decide.outputs.head_sha }}
+      pr_line: ${{ steps.decide.outputs.pr_line }}
+      overlay_dirs: ${{ steps.decide.outputs.overlay_dirs }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Self-test the PR logic
+        run: scripts/upstream-pr/selftest.sh
+
+      - name: Resolve the pull request
+        id: resolve
+        env:
+          PR_NUMBER: ${{ needs.config.outputs.pr_number }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upstream-pr/resolve.sh
+
+      - name: Decide head or overlay
+        id: decide
+        env:
+          LINE: ${{ needs.config.outputs.line }}
+          PACKAGE: ${{ needs.config.outputs.package }}
+          PR_NUMBER: ${{ needs.config.outputs.pr_number }}
+          PR_LINE: ${{ steps.resolve.outputs.line }}
+          HEAD_SHA: ${{ steps.resolve.outputs.head_sha }}
+          MATRIX_ALL: ${{ steps.resolve.outputs.matrix_all }}
+          OVERLAY_DIRS: ${{ steps.resolve.outputs.overlay_dirs }}
+        run: scripts/images/pr-source.sh | tee -a "${GITHUB_OUTPUT}"
+
+  # The branch of the chosen line with the changed directories of the PR on it,
+  # pushed to this repository (deleted by `cleanup`).
+  compose:
+    if: ${{ needs.source.outputs.overlay == 'true' }}
+    needs: [config, source]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      branch: ${{ steps.compose.outputs.branch }}
+      sha: ${{ steps.compose.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Overlay the changed packages
+        id: compose
+        env:
+          PR_NUMBER: ${{ needs.config.outputs.pr_number }}
+          OTHER_BRANCH: ${{ needs.source.outputs.base_branch }}
+          HEAD_SHA: ${{ needs.source.outputs.head_sha }}
+          OVERLAY_DIRS: ${{ needs.source.outputs.overlay_dirs }}
+          TARGET_BRANCH: upstream-overlay/custom-pr${{ needs.config.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upstream-pr/compose.sh
+
+  # The package for the images. packages: write because build.yml may rebuild
+  # the SDK image of a new architecture.
+  build:
+    if: >-
+      ${{ !cancelled() && needs.config.result == 'success'
+      && needs.config.outputs.package != ''
+      && (needs.source.result == 'success' || needs.source.result == 'skipped')
+      && (needs.compose.result == 'success' || needs.compose.result == 'skipped') }}
+    needs: [config, source, compose]
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    with:
+      ci_ref: feat/image-inputs
+      line: ${{ needs.config.outputs.line }}
+      package: ${{ needs.config.outputs.package }}
+      archs: "@profiles"
+      profiles: ${{ needs.config.outputs.profile }}
+      feed_repository: ${{ needs.compose.outputs.sha != '' && github.repository || needs.source.outputs.feed_repository || needs.config.outputs.feed_repository }}
+      feed_ref: ${{ needs.compose.outputs.sha || needs.source.outputs.feed_ref || needs.config.outputs.feed_ref }}
+
+  image:
+    if: >-
+      ${{ !cancelled() && needs.config.result == 'success'
+      && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    needs: [config, build]
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    with:
+      ci_ref: feat/image-inputs
+      line: ${{ needs.config.outputs.line }}
+      package: ${{ needs.config.outputs.package }}
+      profiles: ${{ needs.config.outputs.profile }}
+      packages: ${{ needs.config.outputs.packages }}
+
+  # Only build.yml reads the feed, so the overlay branch can go as soon as the
+  # build is done.
+  cleanup:
+    if: ${{ always() && needs.compose.outputs.branch != '' }}
+    needs: [compose, build]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the overlay branch
+        env:
+          BRANCH: ${{ needs.compose.outputs.branch }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upstream-pr/cleanup.sh
+
+  # What was built, from where, and how big the images are.
+  summary:
+    if: ${{ !cancelled() && needs.config.result == 'success' }}
+    needs: [config, source, compose, build, image]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # The artifacts of the image job, when it made any.
+      - uses: actions/download-artifact@v8.0.2
+        continue-on-error: true
+        with:
+          pattern: images-*
+          path: artifacts
+
+      - name: Summary
+        env:
+          LINE: ${{ needs.config.outputs.line }}
+          PROFILE: ${{ needs.config.outputs.profile }}
+          PACKAGE: ${{ needs.config.outputs.package }}
+          PACKAGES: ${{ needs.config.outputs.packages }}
+          LIMIT: ${{ needs.config.outputs.limit }}
+          SOURCE_MODE: ${{ needs.config.outputs.source_mode }}
+          FEED_REPOSITORY: ${{ needs.build.outputs.feed_repository }}
+          FEED_REF: ${{ needs.build.outputs.feed_ref }}
+          FEED_SHA: ${{ needs.build.outputs.feed_sha }}
+          PR_NUMBER: ${{ needs.config.outputs.pr_number }}
+          PR_LINE: ${{ needs.source.outputs.pr_line }}
+          PR_HEAD_SHA: ${{ needs.source.outputs.head_sha }}
+          OVERLAY: ${{ needs.source.outputs.overlay }}
+          BASE_BRANCH: ${{ needs.source.outputs.base_branch }}
+          OVERLAY_DIRS: ${{ needs.source.outputs.overlay_dirs }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+        run: scripts/images/summary.sh artifacts | tee -a "${GITHUB_STEP_SUMMARY}"
