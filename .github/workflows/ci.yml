@@ -2,8 +2,16 @@
 # repository (packages/<name>/config.yml): build both lines, test each build in
 # QEMU, build its images. Runs on push to feature branches and by hand.
 #
-# The workflows and the scripts both come from the base main (`@main` and
-# ci_ref: main; ci_ref defaults to main, it is kept explicit to match `@main`).
+# The workflows and the scripts both come from the same ref of the base
+# (`@<ref>` and ci_ref: <ref> must stay equal). TEMPORARY: the ref is
+# feat/image-inputs, the branch of the base that adds the profiles, packages,
+# archs, targets and memory inputs; it goes back to main when that branch is
+# merged.
+#
+# What is built, tested and imaged comes from packages/netbird/config.yml (read
+# by scripts/images/config.sh): the profiles and packages of the images and,
+# when set, the test targets and VM memory. The base defaults apply to what the
+# file does not say.
 name: ci
 
 on:
@@ -25,26 +33,28 @@ permissions:
   contents: read
 
 jobs:
-  # packages/netbird/config.yml is the one place with the package name.
+  # packages/netbird/config.yml is the one place with the package name, the
+  # image profiles and packages, and the test targets and memory.
   config:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     outputs:
       package: ${{ steps.read.outputs.package }}
+      profiles: ${{ steps.read.outputs.profiles }}
+      packages: ${{ steps.read.outputs.packages }}
+      targets: ${{ steps.read.outputs.targets }}
+      memory: ${{ steps.read.outputs.memory }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
+      - name: Self-test the configuration scripts
+        run: scripts/images/selftest.sh
+
       - name: Read packages/netbird/config.yml
         id: read
-        run: |
-          package=$(yq -r .package packages/netbird/config.yml)
-          case "${package}" in
-            '' | null | *[!a-z0-9._+-]*) echo "::error::invalid package in packages/netbird/config.yml"; exit 1 ;;
-            *) ;;
-          esac
-          echo "package=${package}" | tee -a "${GITHUB_OUTPUT}"
+        run: scripts/images/config.sh netbird | tee -a "${GITHUB_OUTPUT}"
 
   # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
   # packages: write (and Manage Actions access of this repository on the
@@ -55,12 +65,14 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
+      profiles: ${{ needs.config.outputs.profiles }}
+      targets: ${{ needs.config.outputs.targets }}
 
   build-main:
     if: ${{ inputs.lines != '25.12' }}
@@ -68,51 +80,61 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: main
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
+      profiles: ${{ needs.config.outputs.profiles }}
+      targets: ${{ needs.config.outputs.targets }}
 
   # tests_path: a missing directory means only the generic test runs.
   # secrets: inherit + test_secrets: the named secrets reach only the tests.
   test-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       source: artifact
       tests_path: packages/${{ needs.config.outputs.package }}/tests
+      targets: ${{ needs.config.outputs.targets }}
+      memory: ${{ needs.config.outputs.memory }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 
   test-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: main
       package: ${{ needs.config.outputs.package }}
       source: artifact
       tests_path: packages/${{ needs.config.outputs.package }}/tests
+      targets: ${{ needs.config.outputs.targets }}
+      memory: ${{ needs.config.outputs.memory }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 
   image-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
+      profiles: ${{ needs.config.outputs.profiles }}
+      packages: ${{ needs.config.outputs.packages }}
 
   image-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: main
       package: ${{ needs.config.outputs.package }}
+      profiles: ${{ needs.config.outputs.profiles }}
+      packages: ${{ needs.config.outputs.packages }}
