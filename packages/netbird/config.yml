@@ -23,7 +23,8 @@
 #   services_disabled  optional; list of init scripts (names under /etc/init.d)
 #             that the package leaves disabled by default: the service test of
 #             the base skips them with a logged reason, and every other script
-#             must have a running, stable instance. netbird has none.
+#             must have a running, stable instance. netbird has none. A name
+#             the package does not install is shown as a warning, not a failure.
 #   targets   optional; QEMU test targets (ids of the base harness/targets.yml,
 #             separated by spaces). Without it the base tests all four
 #             (x86-64, armsr-armv8, malta-le, malta-be), which netbird needs.

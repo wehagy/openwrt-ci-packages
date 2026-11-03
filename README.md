@@ -59,7 +59,9 @@ package test.
   timeout. `config.sh` refuses `memory` outside 64M to 1024M and `apk_timeout` outside
   30 to 600 in the first job, before any build. `services_disabled: [name, ...]` lists init scripts that the package
   leaves disabled by default: the service test skips them with a logged reason;
-  every other script needs a running, stable instance (netbird lists none).
+  every other script needs a running, stable instance (netbird lists none). A
+  name the package does not install (a typo, or a PR that renamed the script)
+  does not fail the test: the job summary and a warning annotation name it.
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
   `caller: wehagy/openwrt-ci-packages run commit <sha>, checkout HEAD <sha>`.
 
@@ -139,6 +141,9 @@ in the list: `profile` `other`, `other_profile` `ipq40xx/generic/glinet_gl-b1300
   any build, with the nearest names. A package, `pr_number` or `feed_*` that
   does not make sense together fails in the first job with a message that says
   what to change.
+- The `image` job runs only after a build that succeeded, or when no `package`
+  was given (images only). If `source` or `compose` fails, `build` is skipped
+  and so is `image`, instead of failing later on a missing artifact.
 - A profile whose architecture has no SDK image yet gets one on first use (the
   base builds and pushes it; this repository needs write access to the package
   `ghcr.io/wehagy/openwrt-sdk`, see "SDK image access").
