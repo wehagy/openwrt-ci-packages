@@ -589,6 +589,12 @@ expect_refused "refresh-config: no package" "no packages/<name>/config.yml" env 
 mkdir -p "${work}/bad/aaa"
 printf 'package: zzz\nlines: [main]\n' >"${work}/bad/aaa/config.yml"
 expect_refused "refresh-config: an invalid config stops everything" "package is not aaa" env PACKAGES_DIR="${work}/bad" "${rcfg}"
+# An invalid config next to a valid one must still stop everything: the valid
+# package would otherwise get its images and the broken one none, silently.
+mkdir -p "${work}/bad2/aaa" "${work}/bad2/bbb"
+printf 'package: zzz\nlines: [main]\n' >"${work}/bad2/aaa/config.yml"
+cp "${fx2}/bbb/config.yml" "${work}/bad2/bbb/config.yml"
+expect_refused "refresh-config: an invalid config next to a valid one stops everything" "package is not aaa" env PACKAGES_DIR="${work}/bad2" "${rcfg}"
 
 if [ "${failed}" -ne 0 ]; then
 	echo "images self-test: ${failed} of ${total} case(s) failed" >&2

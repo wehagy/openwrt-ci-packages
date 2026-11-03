@@ -168,4 +168,51 @@ expect "upstream-pr.yml: the legs are the ones resolve made" upstream-pr '.jobs.
 expect "upstream-pr.yml: a leg is one line" upstream-pr '.jobs.lines.with.line' "\${{ matrix.line }}"
 expect "upstream-pr.yml: a leg is one package" upstream-pr '.jobs.lines.with.package' "\${{ matrix.package }}"
 expect "upstream-pr.yml: the lines wait for compose" upstream-pr '.jobs.lines.needs | map(select(. == "compose")) | length' 1
+# --- the images are read only everywhere but refresh-images.yml --------------
+# No run but the daily refresh may write the packages of GHCR: a `packages:
+# write` in any workflow, at any level, would let the code of a pull request or
+# of a feed push an image that every later build trusts.
+all_perms='[.permissions, (.jobs[] | .permissions)]'
+for f in line ci upstream-pr update custom-image refresh-images; do
+	expect "${f}.yml: every permissions block is a map (no write-all)" "${f}" \
+		"${all_perms} | map(select(. != null) | select(tag != \"!!map\")) | length" 0
+	expect "${f}.yml: no refresh_sdk input or text" "${f}" \
+		'[.. | select(tag == "!!map") | keys | .[] | select(. == "refresh_sdk")] | length' 0
+	expect "${f}.yml: no refresh_sdk value" "${f}" '[.. | select(tag == "!!str") | select(test("refresh_sdk"))] | length' 0
+done
+for f in line ci upstream-pr update custom-image; do
+	expect "${f}.yml: no job has a packages permission" "${f}" \
+		"${all_perms} | map(select(tag == \"!!map\") | .packages // \"none\") | map(select(. != \"none\")) | length" 0
+	expect "${f}.yml: nothing reaches the refresh" "${f}" '[.. | select(tag == "!!str") | select(test("refresh-images"))] | length' 0
+done
+for f in line ci upstream-pr update; do
+	expect "${f}.yml: only custom-image.yml asks for the Image Builder fallback" "${f}" \
+		'[.. | select(tag == "!!map") | keys | .[] | select(. == "ib_fallback")] | length' 0
+done
+expect "custom-image.yml: the image job allows the fallback" custom-image '.jobs.image.with.ib_fallback' true
+expect "custom-image.yml: the package build has no fallback" custom-image '.jobs.build.with | has("ib_fallback")' false
+
+# --- refresh-images.yml: the one workflow that writes the images -------------
+expect "refresh-images.yml: only a schedule and a manual run start it" refresh-images '.on | keys | join(" ")' "schedule workflow_dispatch"
+expect "refresh-images.yml: the workflow default is contents: read" refresh-images '.permissions | to_entries | map(.key + "=" + .value) | join(" ")' "contents=read"
+expect "refresh-images.yml: one schedule" refresh-images '.on.schedule | length' 1
+expect "refresh-images.yml: daily, before update.yml" refresh-images '.on.schedule[0].cron' "43 3 * * *"
+expect "refresh-images.yml: the only input of a manual run is force" refresh-images '.on.workflow_dispatch.inputs | keys | join(" ")' force
+expect "refresh-images.yml: one refresh at a time" refresh-images '.concurrency.group' refresh-images
+expect "refresh-images.yml: a running refresh is not cancelled" refresh-images '.concurrency."cancel-in-progress"' false
+expect "refresh-images.yml: the jobs are config and refresh" refresh-images '.jobs | keys | join(" ")' "config refresh"
+expect "refresh-images.yml: only refresh has packages: write" refresh-images \
+	'[.jobs | to_entries[] | select(.value.permissions.packages == "write") | .key] | join(" ")' refresh
+expect "refresh-images.yml: refresh also reads the repository" refresh-images '.jobs.refresh.permissions.contents' read
+expect "refresh-images.yml: config, which reads the code of the branch, only reads" refresh-images '.jobs.config.permissions // "workflow default"' "workflow default"
+expect "refresh-images.yml: refresh waits for config" refresh-images '.jobs.refresh.needs' config
+expect "refresh-images.yml: refresh calls the refresh of the base from main" refresh-images '.jobs.refresh.uses' "wehagy/openwrt-ci/.github/workflows/refresh-images.yml@main"
+expect "refresh-images.yml: refresh takes the scripts of the base from main" refresh-images '.jobs.refresh.with.ci_ref' main
+expect "refresh-images.yml: refresh gets no secret" refresh-images '.jobs.refresh | has("secrets")' false
+expect "refresh-images.yml: no job has an environment" refresh-images '[.jobs | to_entries[] | select(.value | has("environment"))] | length' 0
+expect "refresh-images.yml: refresh takes the lines from config" refresh-images '.jobs.refresh.with.lines' "\${{ needs.config.outputs.lines }}"
+expect "refresh-images.yml: refresh takes the profiles from config" refresh-images '.jobs.refresh.with.profiles' "\${{ needs.config.outputs.profiles }}"
+expect "refresh-images.yml: refresh takes the targets from config" refresh-images '.jobs.refresh.with.targets' "\${{ needs.config.outputs.targets }}"
+expect "refresh-images.yml: force is a boolean of the manual run" refresh-images '.jobs.refresh.with.force' "\${{ inputs.force == true }}"
+expect "refresh-images.yml: config fails when refresh-config.sh fails (pipefail)" refresh-images '.jobs.config.defaults.run.shell' bash
 finish

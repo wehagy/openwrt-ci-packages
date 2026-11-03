@@ -41,6 +41,9 @@ jobs:
   config:
     runs-on: ubuntu-26.04
     timeout-minutes: 5
+    defaults:
+      run:
+        shell: bash # adds pipefail: a failing refresh-config.sh fails the step
     outputs:
       lines: ${{ steps.read.outputs.lines }}
       profiles: ${{ steps.read.outputs.profiles }}

@@ -26,6 +26,12 @@
 #                   advanced: a branch of a fork (e.g. wehagy/packages
 #                   my-branch); excludes pr_number
 #
+# A profile that no packages/*/config.yml names has no Image Builder image on
+# GHCR (the daily refresh builds what the configs name): the image job passes
+# ib_fallback, so the base takes the official container, downloaded at run time,
+# with a notice. The package build has no such fallback: its SDK image must
+# exist (add the profile to packages/<name>/config.yml).
+#
 # Upstream code is untrusted and no secret reaches it: the jobs have no
 # `secrets:`. Nothing is written to openwrt/packages. The overlay branch of this
 # repository (upstream-overlay/*) is deleted when the build is done.
@@ -269,6 +275,7 @@ jobs:
     uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
       ci_ref: main
+      ib_fallback: true
       line: ${{ needs.config.outputs.line }}
       package: ${{ needs.config.outputs.package }}
       profiles: ${{ needs.config.outputs.profile }}

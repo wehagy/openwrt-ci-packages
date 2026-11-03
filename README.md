@@ -206,6 +206,15 @@ in the list: `profile` `other`, `other_profile` `ipq40xx/generic/glinet_gl-b1300
 - A profile whose architecture has no SDK image yet fails the build with the
   command that refreshes the images; the next `refresh-images.yml` creates it
   (see "GHCR images"), because the lists come from the same `config.yml`.
+- An `other` profile that no `config.yml` names has no Image Builder image on
+  GHCR. The `image` job then takes the official container, downloaded at run
+  time (`ib_fallback` of the base; a notice says so, a `main` image runs
+  `setup.sh`, about 10 minutes more, and nothing is written to GHCR). Images
+  only (empty `package`) always work this way. With a `package`, the SDK image
+  of the architecture of the profile must exist: there is no SDK fallback, so
+  for an architecture that no `config.yml` names the build fails with the
+  message of a missing image, which says to add the profile to
+  `packages/<name>/config.yml` (the next refresh then creates the image).
 - The summary compares each image with the size limit of the device only when
   `images.limits` of `config.yml` has it (the two 32 MB devices); otherwise it
   says the limit is unknown (the Image Builder prints it only when an image
