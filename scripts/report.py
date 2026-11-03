@@ -1,6 +1,7 @@
 """Responsibility: turn the jobs and artifacts of an update.yml run into the body
 of the draft pull request: the results of both lines (build, QEMU tests, images)
-the test suites that ran (and the ones that did not) and the ready link that\nopens the upstream pull request by hand. Nothing here
+the test suites that ran (and the ones that did not) and the ready link that
+opens the upstream pull request by hand. Nothing here
 talks to GitHub or writes to any repository; the workflow feeds it JSON lines
 and publishes the text.
 
@@ -148,6 +149,22 @@ def upstream_link(args: argparse.Namespace, main_jobs: list[Job]) -> str:
     )
 
 
+def overlay_text(args: argparse.Namespace) -> str:
+    """What line 25.12 built: the bumped package laid over openwrt-25.12.
+
+    The line does not build the bump commit (a tree of master) but the branch of
+    the line with only the package directory of the bump on it, pushed as a
+    commit of this repository, so the check is the one a backport needs.
+    """
+    what = (
+        f"overlay of {args.overlay_dirs} onto {args.overlay_base_branch} "
+        f"@ {args.overlay_base_sha}"
+    )
+    if not args.feed_sha_25_12:
+        return f"{what}: **not built**"
+    return f"{what}: {args.overlay_repository} @ `{args.feed_sha_25_12}`"
+
+
 def tests_section(args: argparse.Namespace) -> list[str]:
     """Which test suites ran, so a skipped suite is never read as a passed one.
 
@@ -199,7 +216,7 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
         f"| Starting point | `{args.base_branch}` @ `{args.base_sha}` |\n"
         f"| Bump commit | `{args.update_branch}` @ `{args.head_sha}` |\n"
         f"| Built (line `main`) | {args.review_repository} @ `{args.feed_sha_main}` |\n"
-        f"| Built (line `25.12`) | {args.review_repository} @ `{args.feed_sha_25_12}` |\n"
+        f"| Built (line `25.12`) | {overlay_text(args)} |\n"
     )
     out.extend(tests_section(args))
     out.append("## Results\n")
@@ -228,8 +245,11 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
         out.append("")
     if not line_passed(jobs, "25.12"):
         out.append(
-            "Line `25.12` did not pass; the failed jobs are linked above. The pull "
-            "request is open because line `main` passed.\n"
+            "Line `25.12` did not pass; the failed jobs are linked above. It builds "
+            f"only `{args.overlay_dirs}` of the bump on `{args.overlay_base_branch}`, "
+            "so a failure there is the bump as a backport failing (for example a "
+            "Go version the branch does not have), not a failure of master's "
+            "feed. The pull request is open because line `main` passed.\n"
         )
     out.append("## Upstream pull request\n")
     link = upstream_link(args, [j for j in jobs if j.line == "main"])
@@ -264,6 +284,10 @@ def main(argv: list[str] | None = None) -> int:
         "head-sha",
         "feed-sha-main",
         "feed-sha-25-12",
+        "overlay-repository",
+        "overlay-dirs",
+        "overlay-base-branch",
+        "overlay-base-sha",
         "run-url",
         "jobs",
         "artifacts",

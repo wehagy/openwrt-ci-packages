@@ -8,8 +8,13 @@
 #      two branches to the review repository, base (the starting commit) and
 #      update (the commit), so that a pull request between them shows only the
 #      bump;
-#   2. build, QEMU-test and build images of the update branch on both lines,
-#      through the reusable base wehagy/openwrt-ci (feed_repository/feed_ref);
+#   2. build, QEMU-test and build images on both lines, through the reusable
+#      base wehagy/openwrt-ci (feed_repository/feed_ref). Line main builds the
+#      update branch as it is. Line 25.12 builds the openwrt-25.12 branch of
+#      openwrt/packages with only the bumped package directory (package_path)
+#      of the update branch laid over it (job compose, the overlay of
+#      upstream-pr.yml), so it checks the bump as a backport and not master's
+#      whole feed against the 25.12 SDK;
 #   3. publish: when line main passed (line 25.12 may fail), open a draft pull
 #      request between the two branches with the results of both lines and the
 #      link that opens the upstream pull request by hand; otherwise delete both
@@ -18,14 +23,18 @@
 # Failure paths: a run that pushed its branches and then fails or is cancelled
 # deletes them (prepare and publish, see the cleanup steps). A forced
 # cancellation or a lost runner cannot; the next run's detect job then fails
-# with ::error:: on the orphan branches and says how to remove them.
+# with ::error:: on the orphan branches and says how to remove them. The
+# overlay branch of line 25.12 (upstream-overlay/ in THIS repository) is
+# deleted by the job cleanup on every path once build-25-12 is done.
 #
 # The secret TEST_UPSTREAM_TOKEN (fine-grained token, only the review
 # repository, Contents and Pull requests: write) is an environment secret of
 # the environment `review`; only prepare and publish declare it. `secrets:
 # inherit` passes no environment secret, so the test jobs (secrets: inherit and
 # test_secrets: NB_SETUP_KEY) never see the token. A job that runs package code
-# must never declare `environment: review`.
+# must never declare `environment: review`. compose and cleanup push and delete
+# a branch of this repository with the GITHUB_TOKEN (contents: write on those
+# two jobs only); they use no secret and run no package code.
 #
 # The workflows and the scripts of the base both come from its main (`@main` and
 # ci_ref: main; ci_ref defaults to main, it is kept explicit to match `@main`).
@@ -55,6 +64,9 @@ concurrency:
 env:
   COMMIT_NAME: Wesley Gimenes
   COMMIT_EMAIL: wehagy@proton.me
+  # The branch of this repository that carries the tree of line 25.12; known
+  # here so that compose and cleanup agree on it even when compose fails.
+  OVERLAY_BRANCH: upstream-overlay/update-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   # Reads the one configuration file, validates it, runs the self-tests of the
@@ -225,11 +237,45 @@ jobs:
             echo "no branch was pushed by this run: nothing to delete"
           fi
 
-  # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
-  # packages: write (see README.md). feed_ref is the commit of the update
-  # branch, so every architecture and both lines build the same tree.
-  build-25-12:
+  # The tree of line 25.12: openwrt-25.12 of openwrt/packages plus the package
+  # directory of the bump commit, pushed as a branch of this repository (the
+  # base builds repository + ref). Same script as upstream-pr.yml. Runs after
+  # prepare because it reads the update branch of the review repository.
+  compose:
     needs: [detect, prepare]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      sha: ${{ steps.compose.outputs.sha }}
+      base_sha: ${{ steps.compose.outputs.base_sha }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Overlay the bumped package on openwrt-25.12
+        id: compose
+        env:
+          OTHER_BRANCH: openwrt-25.12
+          HEAD_SHA: ${{ needs.prepare.outputs.sha }}
+          OVERLAY_DIRS: ${{ needs.detect.outputs.package_path }}
+          SOURCE_URL: https://github.com/${{ needs.detect.outputs.review_repository }}.git
+          SOURCE_REF: refs/heads/${{ needs.detect.outputs.update_branch }}
+          SOURCE_LABEL: ${{ needs.detect.outputs.review_repository }}:${{ needs.detect.outputs.update_branch }}
+          TARGET_BRANCH: ${{ env.OVERLAY_BRANCH }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upstream-pr/compose.sh
+
+  # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
+  # packages: write (see README.md). Line 25.12 builds the commit of the
+  # overlay branch of this repository; every architecture builds that one tree.
+  build-25-12:
+    needs: [detect, compose]
     permissions:
       contents: read
       packages: write
@@ -238,8 +284,8 @@ jobs:
       ci_ref: main
       line: "25.12"
       package: ${{ needs.detect.outputs.package }}
-      feed_repository: ${{ needs.detect.outputs.review_repository }}
-      feed_ref: ${{ needs.prepare.outputs.sha }}
+      feed_repository: ${{ github.repository }}
+      feed_ref: ${{ needs.compose.outputs.sha }}
 
   build-main:
     needs: [detect, prepare]
@@ -253,6 +299,31 @@ jobs:
       package: ${{ needs.detect.outputs.package }}
       feed_repository: ${{ needs.detect.outputs.review_repository }}
       feed_ref: ${{ needs.prepare.outputs.sha }}
+
+  # Only build.yml reads the feed (test.yml and images.yml use the artifact), so
+  # the overlay branch can go as soon as build-25-12 is done. It runs on every
+  # path (success, failure, cancellation) and also when compose failed after
+  # its push; with no branch there it only says so.
+  cleanup:
+    if: ${{ always() && needs.compose.result != 'skipped' }}
+    needs: [compose, build-25-12]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the overlay branch
+        env:
+          BRANCH: ${{ env.OVERLAY_BRANCH }}
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/upstream-pr/cleanup.sh
 
   # tests_path: a missing directory means only the generic test runs.
   # `secrets: inherit` passes the repository secrets, not those of an
@@ -307,7 +378,9 @@ jobs:
     needs:
       - detect
       - prepare
+      - compose
       - build-25-12
+      - cleanup
       - build-main
       - test-25-12
       - test-main
@@ -380,9 +453,13 @@ jobs:
           HEAD_SHA: ${{ needs.prepare.outputs.sha }}
           FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
           FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
+          PACKAGE_PATH: ${{ needs.detect.outputs.package_path }}
+          OVERLAY_BASE_SHA: ${{ needs.compose.outputs.base_sha }}
         run: |
           python3 -B scripts/report.py \
             --feed-sha-main "${FEED_SHA_MAIN}" --feed-sha-25-12 "${FEED_SHA_25_12}" \
+            --overlay-repository "${GITHUB_REPOSITORY}" --overlay-dirs "${PACKAGE_PATH}" \
+            --overlay-base-branch openwrt-25.12 --overlay-base-sha "${OVERLAY_BASE_SHA}" \
             --package "${PACKAGE}" --package-tests "${PACKAGE_TESTS}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
             --upstream-repository "${UPSTREAM_REPOSITORY}" \
             --review-repository "${REVIEW_REPOSITORY}" --review-is-fork "${REVIEW_IS_FORK}" \
@@ -394,7 +471,9 @@ jobs:
 
       # Both views must agree: the result of the three jobs of line main as
       # GitHub reports it, and the job list the description was built from. The
-      # commit the base reports having built (feed_sha) must be the bump commit.
+      # commit the base reports having built (feed_sha) must be the bump commit
+      # on line main and the overlay commit on line 25.12 (which does not
+      # decide whether the pull request opens, but is never reported wrong).
       - name: Decide
         id: decide
         env:
@@ -404,9 +483,16 @@ jobs:
           REPORT_PASSED: ${{ steps.report.outputs.main_passed }}
           FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.sha }}
+          BUILD_25_12: ${{ needs.build-25-12.result }}
+          FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
+          OVERLAY_SHA: ${{ needs.compose.outputs.sha }}
         run: |
           if [ "${BUILD}" = success ] && [ "${FEED_SHA_MAIN}" != "${HEAD_SHA}" ]; then
             echo "::error::line main built ${FEED_SHA_MAIN}, not the bump commit ${HEAD_SHA}"
+            exit 1
+          fi
+          if [ "${BUILD_25_12}" = success ] && [ "${FEED_SHA_25_12}" != "${OVERLAY_SHA}" ]; then
+            echo "::error::line 25.12 built ${FEED_SHA_25_12}, not the overlay commit ${OVERLAY_SHA}"
             exit 1
           fi
           if [ "${BUILD}" = success ] && [ "${TEST}" = success ] && [ "${IMAGE}" = success ] && [ "${REPORT_PASSED}" = true ]; then

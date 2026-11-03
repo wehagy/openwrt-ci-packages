@@ -70,6 +70,10 @@ def args_for(**extra: str) -> argparse.Namespace:
         "head_sha": "b" * 40,
         "feed_sha_main": "b" * 40,
         "feed_sha_25_12": "c" * 40,
+        "overlay_repository": "wehagy/openwrt-ci-packages",
+        "overlay_dirs": "net/netbird",
+        "overlay_base_branch": "openwrt-25.12",
+        "overlay_base_sha": "d" * 40,
         "run_url": "https://example.invalid/runs/1",
         "package_tests": "none",
     }
@@ -101,7 +105,15 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| `main` passed | passed (3/3) | passed (2/2) |", body)
         self.assertIn("passed (2/2): 1 too big as expected |", body)
         self.assertIn("| Built (line `main`) | wehagy/w @ `" + "b" * 40 + "` |", body)
-        self.assertIn("| Built (line `25.12`) | wehagy/w @ `" + "c" * 40 + "` |", body)
+        self.assertIn(
+            "| Built (line `25.12`) | overlay of net/netbird onto openwrt-25.12 @ "
+            + "d" * 40
+            + ": wehagy/openwrt-ci-packages @ `"
+            + "c" * 40
+            + "` |",
+            body,
+        )
+        self.assertNotIn("wehagy/w @ `" + "c" * 40, body)
 
     def test_image_outcomes(self) -> None:
         body, _ = self.body()
@@ -115,6 +127,14 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| `25.12` **FAILED** |", body)
         self.assertIn("**failure** (step: Run tests) [log](", body)
         self.assertIn("Line `25.12` did not pass", body)
+
+    def test_25_12_failure_says_it_is_the_backport_check(self) -> None:
+        body, _ = self.body({("25.12", "build/mips_24kc"): "failure"})
+        self.assertIn("only `net/netbird` of the bump on `openwrt-25.12`", body)
+
+    def test_25_12_not_built_says_so(self) -> None:
+        body, _ = self.body(feed_sha_25_12="")
+        self.assertIn("@ " + "d" * 40 + ": **not built** |", body)
 
     def test_main_failure_fails_the_line(self) -> None:
         _, jobs = self.body({("main", "build/mips_24kc"): "failure"})

@@ -3,7 +3,7 @@
 # inputs: the validators of lib/common.sh (above all, that the review
 # repository can never be a repository of the organization openwrt), the
 # version comparison, the expansion of the source URL, the Makefile bump and
-# check-config.sh, then flow-selftest.sh. Every case runs; the script fails at the end if one failed.
+# check-config.sh, then flow-selftest.sh and overlay-selftest.sh. Every case runs; the script fails at the end if one failed.
 # Needs yq (check-config.sh). A rejected value is never printed.
 #
 # Usage:
@@ -205,5 +205,8 @@ status_case "check-config refuses a missing review_repository" 1 "${script_dir}/
 flow_rc=0
 "${script_dir}/flow-selftest.sh" || flow_rc=$?
 record "flow-selftest.sh" "${flow_rc}" "see the FAIL lines above"
+overlay_rc=0
+"${script_dir}/overlay-selftest.sh" || overlay_rc=$?
+record "overlay-selftest.sh" "${overlay_rc}" "see the FAIL lines above"
 
 finish
