@@ -8,23 +8,59 @@
 # openwrt/packages. The upstream .github/ is dropped: GITHUB_TOKEN may not
 # push workflow files.
 #
+# The directories come from the head of a pull request of openwrt/packages by
+# default. update.yml names another source instead (SOURCE_URL, SOURCE_REF,
+# SOURCE_LABEL): the bump commit of the review repository, overlaid on
+# openwrt-25.12 to check the bump as a backport.
+#
 # Usage: scripts/upstream-pr/compose.sh
 # Environment variables:
 #   PR_NUMBER, OTHER_BRANCH, HEAD_SHA, OVERLAY_DIRS  from the resolve job
+#                      (PR_NUMBER only when SOURCE_REF is not set)
+#   SOURCE_URL, SOURCE_REF, SOURCE_LABEL  optional: repository (https GitHub
+#                      URL), ref and name to take the directories from, instead
+#                      of refs/pull/PR_NUMBER/head of openwrt/packages;
+#                      HEAD_SHA must be the commit of that ref
 #   TARGET_BRANCH      branch of this repository to push
 #   GITHUB_REPOSITORY  this repository; GH_TOKEN authenticates the push
 #   PUSH_URL           where to push (default https://github.com/$GITHUB_REPOSITORY.git)
-#   GITHUB_OUTPUT, GITHUB_STEP_SUMMARY
+#   GITHUB_OUTPUT (branch, sha, base_sha of OTHER_BRANCH), GITHUB_STEP_SUMMARY
 set -eu
 
 here=$(dirname "$0")
 # shellcheck source=scripts/upstream-pr/lib.sh
 . "${here}/lib.sh"
 
-: "${PR_NUMBER:?}" "${OTHER_BRANCH:?}" "${HEAD_SHA:?}" "${OVERLAY_DIRS:?}" "${TARGET_BRANCH:?}"
+: "${OTHER_BRANCH:?}" "${HEAD_SHA:?}" "${OVERLAY_DIRS:?}" "${TARGET_BRANCH:?}"
 : "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
 
-check_pr_number "${PR_NUMBER}"
+upstream=https://github.com/openwrt/packages.git
+if [ -z "${SOURCE_REF:-}" ]; then
+	: "${PR_NUMBER:?}"
+	check_pr_number "${PR_NUMBER}"
+	source_url=${upstream}
+	source_ref=refs/pull/${PR_NUMBER}/head
+	source_label=openwrt/packages#${PR_NUMBER}
+else
+	: "${SOURCE_URL:?}" "${SOURCE_LABEL:?}"
+	source_url=${SOURCE_URL}
+	source_ref=${SOURCE_REF}
+	source_label=${SOURCE_LABEL}
+	case "${source_url}:${source_ref}:${source_label}" in
+	*[!A-Za-z0-9._/:+#-]*)
+		fail "invalid characters in SOURCE_URL, SOURCE_REF or SOURCE_LABEL"
+		exit 1
+		;;
+	*) ;;
+	esac
+	case "${source_url}" in
+	https://github.com/*) ;;
+	*)
+		fail "SOURCE_URL must be a https://github.com/ URL"
+		exit 1
+		;;
+	esac
+fi
 case "${OTHER_BRANCH}" in
 master | openwrt-25.12) ;;
 *)
@@ -62,14 +98,13 @@ work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
 git init -q "${work}/tree"
 cd "${work}/tree"
-upstream=https://github.com/openwrt/packages.git
 git fetch -q --depth=1 "${upstream}" "${OTHER_BRANCH}"
 base_sha=$(git rev-parse FETCH_HEAD)
-git fetch -q --depth=1 "${upstream}" "refs/pull/${PR_NUMBER}/head"
+git fetch -q --depth=1 "${source_url}" "${source_ref}"
 git checkout -q "${base_sha}"
 fetched=$(git rev-parse FETCH_HEAD)
 if [ "${fetched}" != "${HEAD_SHA}" ]; then
-	fail "the head of pull request ${PR_NUMBER} moved: run again"
+	fail "${source_label} moved: ${source_ref} is ${fetched}, expected ${HEAD_SHA}: run again"
 	exit 1
 fi
 
@@ -88,18 +123,19 @@ tree=$(git write-tree)
 sha=$(GIT_AUTHOR_NAME='github-actions[bot]' GIT_COMMITTER_NAME='github-actions[bot]' \
 	GIT_AUTHOR_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
 	GIT_COMMITTER_EMAIL='41898282+github-actions[bot]@users.noreply.github.com' \
-	git commit-tree -m "overlay of ${OVERLAY_DIRS} from openwrt/packages#${PR_NUMBER} (${HEAD_SHA}) on ${OTHER_BRANCH} (${base_sha})" "${tree}")
+	git commit-tree -m "overlay of ${OVERLAY_DIRS} from ${source_label} (${HEAD_SHA}) on ${OTHER_BRANCH} (${base_sha})" "${tree}")
 git -c credential.helper='!gh auth git-credential' push -q \
 	"${PUSH_URL:-https://github.com/${GITHUB_REPOSITORY}.git}" "${sha}:refs/heads/${TARGET_BRANCH}"
 
 {
 	echo "branch=${TARGET_BRANCH}"
 	echo "sha=${sha}"
+	echo "base_sha=${base_sha}"
 } >>"${GITHUB_OUTPUT}"
 {
 	echo "### overlay for the other line"
 	echo
-	echo "- ${OTHER_BRANCH} @ ${base_sha} + {${OVERLAY_DIRS}} of ${HEAD_SHA}"
+	echo "- ${OTHER_BRANCH} @ ${base_sha} + {${OVERLAY_DIRS}} of ${source_label} @ ${HEAD_SHA}"
 	echo "- pushed as ${GITHUB_REPOSITORY} ${TARGET_BRANCH} @ ${sha} (deleted by the cleanup job)"
 	echo '- files that differ from the line branch:'
 	git diff --stat "${base_sha}" "${sha}" -- . ':!.github' | tail -n 12 | sed 's/^/  - /'
