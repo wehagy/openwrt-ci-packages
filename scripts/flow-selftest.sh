@@ -476,4 +476,79 @@ run_token openwrt/packages
 check "token: refuses openwrt/packages" "exit ${tok_rc}" same "${tok_rc}" 1
 check "token: calls gh not at all for openwrt/packages" "${STUB_LOG}" empty "${STUB_LOG}"
 
+# --- check-fork-base.sh -----------------------------------------------------
+# Run check-fork-base.sh; sets fork_rc and the files fork.out (the lines for
+# $GITHUB_OUTPUT) and fork.err.
+#
+# Arguments:
+#   $1  REVIEW_REPOSITORY
+#   $2  REVIEW_IS_FORK
+run_fork_base() {
+	fork_rc=0
+	REVIEW_REPOSITORY=$1 REVIEW_BRANCH=master REVIEW_IS_FORK=$2 \
+		"${script_dir}/check-fork-base.sh" >"${work}/fork.out" 2>"${work}/fork.err" || fork_rc=$?
+}
+
+master_sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+merge_sha=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+# Answer of the compare call: status, ahead_by, behind_by, head of upstream
+# master, last commit the review branch shares with it.
+#
+# Arguments:
+#   $1  status
+#   $2  ahead_by
+#   $3  behind_by
+fork_fixture() {
+	printf '%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "${master_sha}" "${merge_sha}" >"${STUB_GH_DIR}/compare"
+}
+
+# Test mode: a copy that is not a fork. Reported as it is, upstream not asked.
+gh_fixtures v0.82.0
+run_fork_base wehagy/w false
+check "fork base: not a fork: exits 0" "${work}/fork.err" same "${fork_rc}" 0
+check "fork base: not a fork: says the link is not functional" "${work}/fork.out" has "${work}/fork.out" "upstream_base=not a fork: upstream link not functional"
+check "fork base: not a fork: asks nothing" "${STUB_LOG}" empty "${STUB_LOG}"
+
+# Production: a fork identical to master.
+gh_fixtures v0.82.0
+fork_fixture identical 0 0
+run_fork_base wehagy/packages true
+check "fork base: identical: exits 0" "${work}/fork.err" same "${fork_rc}" 0
+check "fork base: identical: names the base commit" "${work}/fork.out" has "${work}/fork.out" "upstream_base=identical to openwrt/packages master @ \`${master_sha}\`"
+check "fork base: compares master with the owner's review branch" "${STUB_LOG}" has "${STUB_LOG}" "repos/openwrt/packages/compare/master...wehagy:master"
+
+# A fork only behind master: accepted, the lag and the base commit are stated.
+gh_fixtures v0.82.0
+fork_fixture behind 0 7
+run_fork_base wehagy/packages true
+check "fork base: behind: exits 0" "${work}/fork.err" same "${fork_rc}" 0
+check "fork base: behind: names the base commit" "${work}/fork.out" has "${work}/fork.out" "base commit \`${merge_sha}\`, 7 commit(s) behind openwrt/packages master (\`${master_sha}\`)"
+check "fork base: behind: says the pull request holds the bump only" "${work}/fork.out" has "${work}/fork.out" "holds only the bump"
+
+# A fork with commits of its own (ahead or diverged): refused, nothing printed
+# for the description.
+for status in ahead diverged; do
+	gh_fixtures v0.82.0
+	fork_fixture "${status}" 2 3
+	run_fork_base wehagy/packages true
+	check "fork base: ${status}: fails" "${work}/fork.err" failed "${fork_rc}"
+	check "fork base: ${status}: says the commits would travel" "${work}/fork.err" has "${work}/fork.err" "2 commit(s) that openwrt/packages master does not have"
+	check "fork base: ${status}: prints no output line" "${work}/fork.out" empty "${work}/fork.out"
+done
+
+# Answers that cannot be read, a failing call and a bad flag all fail.
+gh_fixtures v0.82.0
+printf 'behind\t\t\t\t\n' >"${STUB_GH_DIR}/compare"
+run_fork_base wehagy/packages true
+check "fork base: an answer without counts fails" "${work}/fork.err" failed "${fork_rc}"
+gh_fixtures v0.82.0
+run_fork_base wehagy/packages true
+check "fork base: a failing comparison fails" "${work}/fork.err" failed "${fork_rc}"
+gh_fixtures v0.82.0
+run_fork_base wehagy/packages maybe
+check "fork base: an unknown fork flag fails" "${work}/fork.err" failed "${fork_rc}"
+run_fork_base openwrt/packages true
+check "fork base: refuses a review repository of openwrt" "${work}/fork.err" failed "${fork_rc}"
+
 finish

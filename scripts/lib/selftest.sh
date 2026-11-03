@@ -108,6 +108,15 @@ same() {
 	[ "$1" = "$2" ]
 }
 
+# Succeed when an exit status is not 0: a refusal. A failed `:?` exits with 1 or
+# 2, depending on the shell.
+#
+# Arguments:
+#   $1  exit status
+failed() {
+	[ "$1" -ne 0 ]
+}
+
 # Print the totals and fail if a case failed.
 finish() {
 	printf '%s checks, %s failed\n' "${checks}" "${failures}"

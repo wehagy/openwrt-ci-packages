@@ -23,6 +23,8 @@
 #     delete_noop   exists: DELETE of a ref succeeds but removes nothing
 #     probe_status  HTTP status of POST pulls (422: allowed, 403: forbidden)
 #     permissions   value of .permissions.push of the repository
+#     compare       the tab-separated answer of repos/<upstream>/compare/...
+#                   (status, ahead_by, behind_by, base sha, merge base sha)
 #   STUB_LOG     file that receives one line "gh <arguments>" per call
 
 set -eu
@@ -68,6 +70,7 @@ api)
 	done
 	case "${method} ${path}" in
 	'GET repos/'*/contents/*/Makefile'?ref='*) cat "${dir}/makefile" ;;
+	'GET repos/'*/compare/*) cat "${dir}/compare" ;;
 	'GET repos/'*/commits/*) cat "${dir}/head_sha" ;;
 	'GET repos/'*/releases/latest) cat "${dir}/tag" ;;
 	'GET repos/'*/branches/*)

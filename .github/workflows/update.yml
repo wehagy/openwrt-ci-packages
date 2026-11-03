@@ -25,7 +25,9 @@
 # cancellation or a lost runner cannot; the next run's detect job then fails
 # with ::error:: on the orphan branches and says how to remove them. The
 # overlay branch of line 25.12 (upstream-overlay/ in THIS repository) is
-# deleted by the job cleanup on every path once build-25-12 is done.
+# deleted by the job cleanup on every path once build-25-12 is done; the one
+# a killed run leaves is deleted by the job sweep of a later run, once it is
+# older than a day.
 #
 # The secret TEST_UPSTREAM_TOKEN (fine-grained token, only the review
 # repository, Contents and Pull requests: write) is an environment secret of
@@ -95,6 +97,7 @@ jobs:
       memory: ${{ steps.images.outputs.memory }}
       apk_timeout: ${{ steps.images.outputs.apk_timeout }}
       services_disabled: ${{ steps.images.outputs.services_disabled }}
+      upstream_base: ${{ steps.upstream_base.outputs.upstream_base }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -142,6 +145,20 @@ jobs:
           case "${fork}" in true | false) ;; *) echo "::error::cannot tell if the review repository is a fork"; exit 1 ;; esac
           echo "review_is_fork=${fork}" | tee -a "${GITHUB_OUTPUT}"
 
+      # Production guard, before anything is pushed: a fork must not carry
+      # commits that openwrt/packages master lacks (the upstream pull request
+      # would carry them); the base commit goes into the description. The test
+      # copy, not a fork, only gets its note.
+      - name: Check the base against openwrt/packages master
+        id: upstream_base
+        if: ${{ steps.plan.outputs.needed == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REVIEW_REPOSITORY: ${{ steps.config.outputs.review_repository }}
+          REVIEW_BRANCH: ${{ steps.config.outputs.review_branch }}
+          REVIEW_IS_FORK: ${{ steps.fork.outputs.review_is_fork }}
+        run: scripts/check-fork-base.sh | tee -a "${GITHUB_OUTPUT}"
+
       - name: Summary
         env:
           NEEDED: ${{ steps.plan.outputs.needed }}
@@ -155,6 +172,30 @@ jobs:
             echo "- update needed: \`${NEEDED}\`"
             echo "- ${REASON}"
           } | tee -a "${GITHUB_STEP_SUMMARY}"
+
+  # Deletes the overlay branches (upstream-overlay/update-*) older than a day,
+  # which a killed run left behind: cleanup cannot run in a run that dies. A
+  # younger branch may be in use and stays. It does not depend on any other job
+  # and none depends on it. contents: write, the GITHUB_TOKEN, no secret, no
+  # package code.
+  sweep:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Delete the stale overlay branches
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAX_AGE_HOURS: "24"
+        run: scripts/upstream-pr/sweep.sh
 
   # The first job with the token: commit the bump and push the two branches. It
   # runs before the build because the base builds a commit of the review
@@ -459,9 +500,21 @@ jobs:
             --jq '.artifacts[] | {name}' >artifacts.jsonl
           wc -l jobs.jsonl artifacts.jsonl
 
-      # The test jobs have no secrets, so tests that need one skip. The
-      # description says which suites exist and that the runtime ones did not
-      # pass, so a skipped suite is never read as a passed one.
+      # The junit file (results.xml) of every QEMU job is an artifact of this
+      # run. The description counts what each suite passed, skipped and failed
+      # from them, so a skipped suite is never read as a passed one and a job
+      # without a file is named.
+      - name: Download the test results
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ needs.detect.outputs.package }}
+        run: |
+          mkdir results
+          if ! gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --pattern "qemu-${PACKAGE}-*" --dir results; then
+            echo "::warning::no test results could be downloaded: the description says so for every target"
+          fi
+          find results -name results.xml | sort
+
       - name: Look for the package runtime tests
         id: suites
         env:
@@ -485,6 +538,9 @@ jobs:
           FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
           PACKAGE_PATH: ${{ needs.detect.outputs.package_path }}
           OVERLAY_BASE_SHA: ${{ needs.compose.outputs.base_sha }}
+          UPSTREAM_BASE: ${{ needs.detect.outputs.upstream_base }}
+          # The names of the secrets the test jobs pass (their test_secrets).
+          TEST_SECRETS: NB_SETUP_KEY
         run: |
           python3 -B scripts/report.py \
             --feed-sha-main "${FEED_SHA_MAIN}" --feed-sha-25-12 "${FEED_SHA_25_12}" \
@@ -496,7 +552,8 @@ jobs:
             --base-branch "${BASE_BRANCH}" --update-branch "${UPDATE_BRANCH}" \
             --base-sha "${BASE_SHA}" --head-sha "${HEAD_SHA}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
-            --jobs jobs.jsonl --artifacts artifacts.jsonl --out body.md | tee -a "${GITHUB_OUTPUT}"
+            --upstream-base "${UPSTREAM_BASE}" --test-secrets "${TEST_SECRETS}" \
+            --jobs jobs.jsonl --artifacts artifacts.jsonl --results results --out body.md | tee -a "${GITHUB_OUTPUT}"
           cat body.md >>"${GITHUB_STEP_SUMMARY}"
 
       # Both views must agree: the result of the three jobs of line main as

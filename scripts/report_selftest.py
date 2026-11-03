@@ -76,9 +76,61 @@ def args_for(**extra: str) -> argparse.Namespace:
         "overlay_base_sha": "d" * 40,
         "run_url": "https://example.invalid/runs/1",
         "package_tests": "none",
+        "upstream_base": "not a fork: upstream link not functional",
+        "test_secrets": "NB_SETUP_KEY",
+        "results": "",
     }
     values.update(extra)
     return argparse.Namespace(**values)
+
+
+def junit(generic: tuple[int, int, int], package: tuple[int, int, int]) -> str:
+    """A results.xml with (passed, skipped, failed) cases per suite."""
+    cases = []
+    for classname, (passed, skipped, failed) in (
+        ("tests.ext.test_package", generic),
+        ("tests.ext.test_package_netbird", package),
+    ):
+        for n in range(passed):
+            cases.append(f'<testcase classname="{classname}" name="ok{n}"/>')
+        for n in range(skipped):
+            cases.append(
+                f'<testcase classname="{classname}" name="skip{n}">'
+                '<skipped type="pytest.skip" message="NB_SETUP_KEY is not set"/>'
+                "</testcase>"
+            )
+        for n in range(failed):
+            cases.append(
+                f'<testcase classname="{classname}" name="bad{n}">'
+                '<failure message="boom"/></testcase>'
+            )
+    return (
+        '<?xml version="1.0"?><testsuites><testsuite name="pytest">'
+        + "".join(cases)
+        + "</testsuite></testsuites>"
+    )
+
+
+def write_results(
+    root: str, per_target: dict[tuple[str, str], str], logs: bool = True
+) -> None:
+    """Lay the artifacts out as `gh run download` does: one directory each."""
+    for (line, target), xml in per_target.items():
+        directory = os.path.join(root, f"qemu-netbird-{line}-{target}")
+        os.makedirs(directory)
+        with open(os.path.join(directory, "results.xml"), "w", encoding="utf-8") as f:
+            f.write(xml)
+        if logs:
+            os.makedirs(os.path.join(root, f"qemu-netbird-{line}-{target}-logs"))
+
+
+def every_target(generic: tuple[int, int, int], package: tuple[int, int, int]) -> dict:
+    """The same junit for every target of both lines."""
+    return {
+        (line, target): junit(generic, package)
+        for line in report.LINES
+        for target in TARGETS
+    }
 
 
 ARTIFACTS = {
@@ -90,9 +142,14 @@ ARTIFACTS = {
 class ReportTest(unittest.TestCase):
     """Cases of scripts/report.py."""
 
-    def body(self, failing=None, **extra: str) -> tuple[str, list[report.Job]]:
+    def body(
+        self, failing=None, results=None, **extra: str
+    ) -> tuple[str, list[report.Job]]:
         jobs = report.parse_jobs(all_jobs(failing))
-        return report.build_body(args_for(**extra), jobs, ARTIFACTS), jobs
+        with tempfile.TemporaryDirectory() as tmp:
+            write_results(tmp, results or {})
+            found = report.parse_results(tmp, "netbird")
+        return report.build_body(args_for(**extra), jobs, ARTIFACTS, found), jobs
 
     def test_setup_jobs_are_ignored(self) -> None:
         jobs = report.parse_jobs(all_jobs())
@@ -169,27 +226,134 @@ class ReportTest(unittest.TestCase):
     def test_test_copy_note_only_when_not_a_fork(self) -> None:
         body, _ = self.body()
         self.assertIn("not a fork: the link below is only generated", body)
-        body, _ = self.body(review_is_fork="true", review_repository="wehagy/packages")
+        body, _ = self.body(
+            review_is_fork="true",
+            review_repository="wehagy/packages",
+            upstream_base="identical to openwrt/packages master",
+        )
         self.assertNotIn("not a fork", body)
         self.assertIn("[Open the upstream pull request](https://github.com/", body)
         self.assertIn("compare/master...wehagy:packages:", body)
 
     def test_missing_runtime_tests_are_said_not_run(self) -> None:
-        body, _ = self.body(package_tests="none")
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (0, 0, 0)), package_tests="none"
+        )
         self.assertIn("## Test suites that ran", body)
         self.assertIn(
-            "| Package runtime tests | **NOT RUN**: `packages/netbird/tests` does not "
-            "exist |",
+            "| `main` | package tests (`packages/netbird/tests`) | **NOT RUN**: the "
+            "directory does not exist | | | |",
             body,
         )
         self.assertIn("A green QEMU test above is the generic test only", body)
 
-    def test_runtime_tests_without_secrets_are_said_skipped(self) -> None:
-        body, _ = self.body(package_tests="present")
-        self.assertIn("run only when that secret is set and are skipped", body)
+    def test_runtime_tests_that_ran_are_counted_per_line(self) -> None:
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (7, 0, 0)), package_tests="present"
+        )
+        self.assertIn(
+            "| `main` | generic package test (install and files) | 6 | 0 | 0 | "
+            "malta-be, x86-64 |",
+            body,
+        )
+        self.assertIn(
+            "| `25.12` | package tests (`packages/netbird/tests`) | 14 | 0 | 0 | "
+            "malta-be, x86-64 |",
+            body,
+        )
+        self.assertIn(
+            "Secrets passed to the tests (`test_secrets`, names only): `NB_SETUP_KEY`.",
+            body,
+        )
         self.assertNotIn("NOT RUN", body)
-        self.assertIn("A test skipped for lack of a secret is not a pass", body)
+        self.assertNotIn("test(s) of the", body)
         self.assertNotIn("generic test only", body)
+        self.assertNotIn("No package test passed", body)
+
+    def test_skipped_runtime_tests_are_named(self) -> None:
+        results = every_target((3, 0, 0), (6, 1, 0))
+        results[("25.12", "x86-64")] = junit((3, 0, 0), (7, 0, 0))
+        body, _ = self.body(results=results, package_tests="present")
+        self.assertIn(
+            "| `main` | package tests (`packages/netbird/tests`) | 12 | 2 | 0 |", body
+        )
+        self.assertIn(
+            "| `25.12` | package tests (`packages/netbird/tests`) | 13 | 1 | 0 |", body
+        )
+        self.assertIn(
+            "2 test(s) of the package suite skipped (skip0: NB_SETUP_KEY is not set)",
+            body,
+        )
+        self.assertIn("A skipped test is not a pass", body)
+
+    def test_failed_tests_are_counted_and_missing_results_are_said(self) -> None:
+        results = every_target((2, 0, 1), (7, 0, 0))
+        del results[("main", "malta-be")]
+        body, _ = self.body(results=results, package_tests="present")
+        self.assertIn(
+            "| `main` | generic package test (install and files) | 2 | 0 | 1 | x86-64; **no result file: malta-be** |",
+            body,
+        )
+        self.assertIn("test(s) of the generic suite failed", body)
+
+    def test_no_result_files_do_not_read_as_a_pass(self) -> None:
+        body, _ = self.body(results={}, package_tests="present")
+        self.assertIn(
+            "| `main` | package tests (`packages/netbird/tests`) | 0 | 0 | 0 | none; **no result file: malta-be, x86-64** |",
+            body,
+        )
+        self.assertIn("No package test passed on any target", body)
+
+    def test_no_secret_is_said(self) -> None:
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (7, 0, 0)),
+            package_tests="present",
+            test_secrets="",
+        )
+        self.assertIn("No secret was passed to the tests.", body)
+
+    def test_logs_artifacts_and_other_packages_are_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            write_results(tmp, {("main", "x86-64"): junit((3, 0, 0), (7, 0, 0))})
+            os.makedirs(
+                os.path.join(tmp, "qemu-netbird-main-x86-64-logs"), exist_ok=True
+            )
+            with open(
+                os.path.join(tmp, "qemu-netbird-main-x86-64-logs", "results.xml"),
+                "w",
+                encoding="utf-8",
+            ) as f:
+                f.write(junit((9, 9, 9), (9, 9, 9)))
+            write_results(tmp, {("main", "malta-be"): junit((1, 0, 0), (1, 0, 0))})
+            os.rename(
+                os.path.join(tmp, "qemu-netbird-main-malta-be"),
+                os.path.join(tmp, "qemu-other-main-malta-be"),
+            )
+            found = report.parse_results(tmp, "netbird")
+        self.assertEqual([(r.line, r.target) for r in found], [("main", "x86-64")])
+        self.assertEqual(found[0].package.passed, 7)
+
+    def test_run_tested_line_counts_the_package_tests(self) -> None:
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (7, 1, 0)), package_tests="present"
+        )
+        link = next(r for r in body.splitlines() if r.startswith("https://github.com/"))
+        text = parse_qs(urlsplit(link).query)["body"][0]
+        self.assertIn(
+            "generic package test: install and files; package runtime tests: "
+            "14 passed, 2 skipped, 0 failed)",
+            text,
+        )
+
+    def test_upstream_base_row(self) -> None:
+        body, _ = self.body()
+        self.assertIn(
+            "| Upstream base | not a fork: upstream link not functional |", body
+        )
+        body, _ = self.body(upstream_base="behind openwrt/packages master by 3 commits")
+        self.assertIn(
+            "| Upstream base | behind openwrt/packages master by 3 commits |", body
+        )
 
     def test_suites_come_before_the_results(self) -> None:
         body, _ = self.body()
@@ -199,9 +363,10 @@ class ReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv = []
             for key, value in vars(args_for()).items():
-                if key != "package_tests":
+                if key not in ("package_tests", "results"):
                     argv += [f"--{key.replace('_', '-')}", value]
-            argv += ["--jobs", "j", "--artifacts", "a", "--out", os.path.join(tmp, "o")]
+            argv += ["--jobs", "j", "--artifacts", "a", "--results", tmp]
+            argv += ["--out", os.path.join(tmp, "o")]
             with self.assertRaises(SystemExit):
                 report.main(argv)
 
@@ -215,11 +380,23 @@ class ReportTest(unittest.TestCase):
             argv = []
             for key, value in vars(args_for()).items():
                 argv += [f"--{key.replace('_', '-')}", value]
+            results = os.path.join(tmp, "results")
+            write_results(results, every_target((3, 0, 0), (7, 0, 0)))
             argv += ["--jobs", paths["jobs"], "--artifacts", paths["artifacts"]]
-            argv += ["--out", paths["out"]]
+            argv += ["--results", results, "--out", paths["out"]]
             self.assertEqual(report.main(argv), 0)
             with open(paths["out"], encoding="utf-8") as handle:
                 self.assertIn("## Results", handle.read())
+
+    def test_cli_requires_the_new_inputs(self) -> None:
+        for missing in ("upstream_base", "test_secrets", "results"):
+            argv = []
+            for key, value in vars(args_for()).items():
+                if key != missing:
+                    argv += [f"--{key.replace('_', '-')}", value]
+            argv += ["--jobs", "j", "--artifacts", "a", "--out", "o"]
+            with self.subTest(missing=missing), self.assertRaises(SystemExit):
+                report.main(argv)
 
 
 if __name__ == "__main__":

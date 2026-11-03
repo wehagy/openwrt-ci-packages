@@ -1,22 +1,26 @@
 """Responsibility: turn the jobs and artifacts of an update.yml run into the body
 of the draft pull request: the results of both lines (build, QEMU tests, images)
-the test suites that ran (and the ones that did not) and the ready link that
-opens the upstream pull request by hand. Nothing here
-talks to GitHub or writes to any repository; the workflow feeds it JSON lines
-and publishes the text.
+the test suites that ran (counted from the junit files of the QEMU jobs, with
+what was skipped and what is missing) and the ready link that opens the
+upstream pull request by hand. Nothing here talks to GitHub or writes to any
+repository; the workflow feeds it JSON lines and junit files and publishes the
+text.
 
 Usage:
     scripts/report.py --package netbird --old 0.81.4 --new 0.82.0 ... \\
-        --jobs jobs.jsonl --artifacts artifacts.jsonl --out body.md
+        --jobs jobs.jsonl --artifacts artifacts.jsonl --results results --out body.md
     prints "main_passed=true|false" (a line for $GITHUB_OUTPUT)
 
 Environment variables: none.
 """
 
 import argparse
+import glob
 import json
+import os
 import re
 import sys
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
@@ -25,6 +29,11 @@ STAGES = ("build", "test", "image")
 STAGE_TITLES = {"build": "Build (SDK)", "test": "QEMU test", "image": "Image"}
 UPSTREAM_REPOSITORY = "openwrt/packages"
 UPSTREAM_BRANCH = "master"
+# Module of the generic package test of the base; every other test class is a
+# test of the package itself (packages/<name>/tests).
+GENERIC_CLASS = "tests.ext.test_package"
+RESULTS_MAX_BYTES = 1_000_000
+SKIP_REASON_MAX = 100
 # "<caller job> / <job of the base>", e.g. "image-main / main x86-64-generic".
 JOB_NAME = re.compile(r"^(build|test|image)-(?:main|25-12) / (main|25\.12) (\S+)$")
 
@@ -65,6 +74,72 @@ def parse_jobs(records: list[dict]) -> list[Job]:
             )
         )
     return jobs
+
+
+@dataclass
+class Counts:
+    """Passed, skipped and failed test cases of one suite."""
+
+    passed: int = 0
+    skipped: int = 0
+    failed: int = 0
+    reasons: list[str] = field(default_factory=list)
+
+    def add(self, other: "Counts") -> None:
+        """Accumulate another count."""
+        self.passed += other.passed
+        self.skipped += other.skipped
+        self.failed += other.failed
+        for reason in other.reasons:
+            if reason not in self.reasons:
+                self.reasons.append(reason)
+
+
+@dataclass
+class TargetResult:
+    """The junit result of one QEMU job: the generic suite and the package's."""
+
+    line: str
+    target: str
+    generic: Counts = field(default_factory=Counts)
+    package: Counts = field(default_factory=Counts)
+
+
+def parse_junit(path: str) -> tuple[Counts, Counts]:
+    """Count the test cases of one results.xml: (generic suite, package suite)."""
+    if os.path.getsize(path) > RESULTS_MAX_BYTES:
+        raise ValueError(f"{path} is larger than {RESULTS_MAX_BYTES} bytes")
+    generic, package = Counts(), Counts()
+    for case in ET.parse(path).getroot().iter("testcase"):
+        counts = generic if case.get("classname") == GENERIC_CLASS else package
+        tags = {child.tag for child in case}
+        if "skipped" in tags:
+            counts.skipped += 1
+            message = (case.find("skipped").get("message") or "").strip()
+            reason = f"{case.get('name')}: {message}"[:SKIP_REASON_MAX]
+            if reason not in counts.reasons:
+                counts.reasons.append(reason)
+        elif tags & {"failure", "error"}:
+            counts.failed += 1
+        else:
+            counts.passed += 1
+    return generic, package
+
+
+def parse_results(directory: str, package: str) -> list[TargetResult]:
+    """Read <directory>/qemu-<package>-<line>-<target>/results.xml (the artifacts
+    of the QEMU jobs, as `gh run download` lays them out)."""
+    found = []
+    name = re.compile(rf"^qemu-{re.escape(package)}-(main|25\.12)-(.+)$")
+    for path in sorted(glob.glob(os.path.join(directory, "qemu-*", "results.xml"))):
+        match = name.match(os.path.basename(os.path.dirname(path)))
+        if match is None or match.group(2).endswith("-logs"):
+            continue
+        generic, package_counts = parse_junit(path)
+        found.append(
+            TargetResult(match.group(1), match.group(2), generic, package_counts)
+        )
+    return found
 
 
 def image_result(job: Job, artifacts: set[str], package: str) -> str:
@@ -119,7 +194,9 @@ def stage_summary(
     return text
 
 
-def upstream_link(args: argparse.Namespace, main_jobs: list[Job]) -> str:
+def upstream_link(
+    args: argparse.Namespace, main_jobs: list[Job], results: list[TargetResult]
+) -> str:
     """The URL that opens the upstream pull request from the review branch.
 
     It only names the branch of the fork (owner:repository:branch); nothing is
@@ -133,11 +210,21 @@ def upstream_link(args: argparse.Namespace, main_jobs: list[Job]) -> str:
         j.item for j in main_jobs if j.stage == "test" and j.conclusion == "success"
     )
     title = f"{args.package}: update to {args.new}"
+    package_run = Counts()
+    for result in results:
+        if result.line == "main":
+            package_run.add(result.package)
+    runtime = (
+        f"; package runtime tests: {package_run.passed} passed, "
+        f"{package_run.skipped} skipped, {package_run.failed} failed"
+        if args.package_tests == "present" and results
+        else ""
+    )
     body = (
         f"Maintainer: @{owner}\n"
         f"Compile tested: {', '.join(built) or 'none'} (OpenWrt main SDK)\n"
         f"Run tested: QEMU {', '.join(tested) or 'none'} (OpenWrt main, "
-        "generic package test: install and files)\n\n"
+        f"generic package test: install and files{runtime})\n\n"
         f"Update NetBird from {args.old} to {args.new}.\n\n"
         "Release notes:\n"
         f"https://github.com/{args.upstream_repository}/releases/tag/v{args.new}\n"
@@ -165,40 +252,91 @@ def overlay_text(args: argparse.Namespace) -> str:
     return f"{what}: {args.overlay_repository} @ `{args.feed_sha_25_12}`"
 
 
-def tests_section(args: argparse.Namespace) -> list[str]:
-    """Which test suites ran, so a skipped suite is never read as a passed one.
+def counts_row(counts: Counts) -> str:
+    """The Passed / Skipped / Failed cells of one suite."""
+    return f"{counts.passed} | {counts.skipped} | {counts.failed}"
 
-    The package tests that need a secret (for NetBird, NB_SETUP_KEY) skip when
-    it is not set, and the run cannot tell. Without package tests a green QEMU
-    test is the generic package test, which proves install and files, not that
-    the program works; the description has to say it.
+
+def tests_section(
+    args: argparse.Namespace, jobs: list[Job], results: list[TargetResult]
+) -> list[str]:
+    """Which test suites ran, counted from the junit files of this run.
+
+    A green QEMU job does not say what ran inside it: the generic package test
+    proves install and files only, the package's own tests (packages/<name>/tests,
+    which for NetBird need NB_SETUP_KEY and skip without it) prove that the
+    program works. So the table lists, per line, what each suite passed, skipped
+    and failed, and the targets whose test job left no result file.
     """
     directory = f"packages/{args.package}/tests"
-    if args.package_tests == "present":
-        runtime = (
-            f"`{directory}` runs in the QEMU jobs; tests that need `NB_SETUP_KEY` "
-            "run only when that secret is set and are skipped otherwise"
-        )
-        caution = (
-            "**A test skipped for lack of a secret is not a pass: check the "
-            "QEMU job logs for skips.**\n"
+    lines = [
+        "## Test suites that ran\n",
+        "Counted from the `results.xml` of the QEMU test jobs of this run.\n",
+        "| Line | Suite | Passed | Skipped | Failed | Targets |\n|---|---|---|---|---|---|",
+    ]
+    notes = []
+    for line in LINES:
+        have = [r for r in results if r.line == line]
+        expected = sorted(j.item for j in jobs if j.line == line and j.stage == "test")
+        missing = [t for t in expected if t not in {r.target for r in have}]
+        targets = ", ".join(sorted(r.target for r in have)) or "none"
+        if missing:
+            targets += f"; **no result file: {', '.join(missing)}**"
+        for label, attr in (
+            ("generic package test (install and files)", "generic"),
+            (f"package tests (`{directory}`)", "package"),
+        ):
+            total = Counts()
+            for r in have:
+                total.add(getattr(r, attr))
+            if attr == "package" and args.package_tests != "present":
+                lines.append(
+                    f"| `{line}` | {label} | **NOT RUN**: the directory does not exist"
+                    " | | | |"
+                )
+                continue
+            lines.append(f"| `{line}` | {label} | {counts_row(total)} | {targets} |")
+            if total.skipped:
+                notes.append(
+                    f"**Line `{line}`: {total.skipped} test(s) of the {attr} suite "
+                    f"skipped ({'; '.join(total.reasons)}). A skipped test is not a "
+                    "pass.**"
+                )
+            if total.failed:
+                notes.append(
+                    f"**Line `{line}`: {total.failed} test(s) of the {attr} suite "
+                    "failed; see the QEMU job logs.**"
+                )
+    secrets = args.test_secrets.replace(",", " ").split()
+    lines.append("")
+    if secrets:
+        names = ", ".join(f"`{n}`" for n in secrets)
+        lines.append(
+            f"Secrets passed to the tests (`test_secrets`, names only): {names}.\n"
         )
     else:
-        runtime = f"**NOT RUN**: `{directory}` does not exist"
-        caution = (
+        lines.append("No secret was passed to the tests.\n")
+    if args.package_tests != "present":
+        notes.append(
             "**A green QEMU test above is the generic test only. It does not show "
-            "that the program works at runtime.**\n"
+            "that the program works at runtime.**"
         )
-    return [
-        "## Test suites that ran\n",
-        "| Suite | Ran |\n|---|---|",
-        "| Generic package test in QEMU (install and files) | yes, see Results |",
-        f"| Package runtime tests | {runtime} |\n",
-        caution,
-    ]
+    elif not any(r.package.passed for r in results):
+        notes.append(
+            "**No package test passed on any target: the QEMU result does not show "
+            "that the program works at runtime.**"
+        )
+    for note in notes:
+        lines.append(note + "\n")
+    return lines
 
 
-def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -> str:
+def build_body(
+    args: argparse.Namespace,
+    jobs: list[Job],
+    artifacts: set[str],
+    results: list[TargetResult],
+) -> str:
     """The full pull request description."""
     out = []
     out.append(
@@ -214,11 +352,12 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
     out.append(f"| CI run | {args.run_url} |")
     out.append(
         f"| Starting point | `{args.base_branch}` @ `{args.base_sha}` |\n"
+        f"| Upstream base | {args.upstream_base} |\n"
         f"| Bump commit | `{args.update_branch}` @ `{args.head_sha}` |\n"
         f"| Built (line `main`) | {args.review_repository} @ `{args.feed_sha_main}` |\n"
         f"| Built (line `25.12`) | {overlay_text(args)} |\n"
     )
-    out.extend(tests_section(args))
+    out.extend(tests_section(args, jobs, results))
     out.append("## Results\n")
     out.append("| Line | Build (SDK) | QEMU test | Images |\n|---|---|---|---|")
     for line in LINES:
@@ -252,7 +391,7 @@ def build_body(args: argparse.Namespace, jobs: list[Job], artifacts: set[str]) -
             "feed. The pull request is open because line `main` passed.\n"
         )
     out.append("## Upstream pull request\n")
-    link = upstream_link(args, [j for j in jobs if j.line == "main"])
+    link = upstream_link(args, [j for j in jobs if j.line == "main"], results)
     if args.review_is_fork == "true":
         out.append(f"[Open the upstream pull request]({link})\n")
     else:
@@ -291,16 +430,20 @@ def main(argv: list[str] | None = None) -> int:
         "run-url",
         "jobs",
         "artifacts",
+        "results",
         "out",
     ):
         parser.add_argument(f"--{option}", required=True)
+    parser.add_argument("--upstream-base", required=True)
+    parser.add_argument("--test-secrets", required=True)
     parser.add_argument("--review-is-fork", choices=("true", "false"), required=True)
     parser.add_argument("--package-tests", choices=("present", "none"), required=True)
     args = parser.parse_args(argv)
     jobs = parse_jobs(read_jsonl(args.jobs))
     artifacts = {a["name"] for a in read_jsonl(args.artifacts)}
+    results = parse_results(args.results, args.package)
     with open(args.out, "w", encoding="utf-8") as handle:
-        handle.write(build_body(args, jobs, artifacts))
+        handle.write(build_body(args, jobs, artifacts, results))
     print(f"main_passed={'true' if line_passed(jobs, 'main') else 'false'}")
     return 0
 

@@ -30,7 +30,8 @@ package test.
 - `.github/workflows/upstream-pr.yml`: tests a pull request of `openwrt/packages`
   by number, `workflow_dispatch` only (see "Testing an upstream pull request").
 - `scripts/upstream-pr/`: its shell (`lib.sh`, `resolve.sh`, `compose.sh`,
-  `cleanup.sh`, the last two also used by `update.yml`) and `selftest.sh`, which
+  `cleanup.sh`, the last two also used by `update.yml`; `sweep.sh`, only
+  `update.yml`) and `selftest.sh`, which
   the workflow runs first.
 - `.github/workflows/update.yml`: a new NetBird release becomes a draft pull
   request for manual review (see "Update workflow").
@@ -198,12 +199,13 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 
 | Job | What it does |
 |---|---|
-| `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for the two branches and for pull requests (any state) of that version. Read only. Branches without an open pull request are orphans: the job fails (see "Orphan branches"). |
+| `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for the two branches and for pull requests (any state) of that version. Read only. Branches without an open pull request are orphans: the job fails (see "Orphan branches"). When an update is needed it also runs the production guard (`scripts/check-fork-base.sh`, see "Production guard"). |
 | `prepare` | token job 1 (`environment: review`). Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. It first proves that the token can push and open pull requests (`scripts/check-token.sh`). A failure or cancellation after the first push deletes the branches this run created. |
-| `compose` | after `prepare`. Line `25.12` must build `openwrt-25.12`, not master's feed, so this job takes the `openwrt-25.12` branch of `openwrt/packages`, copies over it only `package_path` (`net/netbird`) from the update branch (`scripts/upstream-pr/compose.sh`, the overlay of `upstream-pr.yml`, with `SOURCE_URL`/`SOURCE_REF` naming the review repository) and pushes one root commit as `upstream-overlay/update-netbird-<run id>-<attempt>` to **this** repository. `contents: write`, the `GITHUB_TOKEN`, no secret, no package code. |
+| `compose` | after `prepare`. Line `25.12` must build `openwrt-25.12`, not master's feed, so this job takes the `openwrt-25.12` branch of `openwrt/packages`, copies over it only `package_path` (`net/netbird`) from the update branch (`scripts/upstream-pr/compose.sh`, the overlay of `upstream-pr.yml`, with `SOURCE_URL`/`SOURCE_REF` naming the review repository) and pushes one root commit as `upstream-overlay/update-<run id>-<attempt>` to **this** repository. `contents: write`, the `GITHUB_TOKEN`, no secret, no package code. |
 | `build-*`, `test-*`, `image-*` | the base, for both lines, with the same settings as `ci.yml`: `detect` reads `packages/netbird/config.yml` with `scripts/images/config.sh` and passes `profiles` and `targets` to `build-*`, `targets`, `memory` (256M), `apk_timeout` (120) and `services_disabled` to `test-*`, `profiles` and `packages` to `image-*`. Line `main`: `feed_repository` = review repository and `feed_ref` = the SHA of the update branch (the bump commit as it is). Line `25.12`: `feed_repository` = this repository and `feed_ref` = the overlay commit of `compose`, i.e. `openwrt-25.12` plus `net/netbird` of the bump. `test-*` get `secrets: inherit` and `test_secrets: NB_SETUP_KEY` (not the token, see "Secret `TEST_UPSTREAM_TOKEN`"); build and image jobs get no secrets. |
-| `cleanup` | deletes the overlay branch (`scripts/upstream-pr/cleanup.sh`, only under `upstream-overlay/`) once `build-25-12` is done, on success, failure and cancellation, also when `compose` failed after its push (no branch: it only says so). `contents: write`. A killed run (forced cancellation, lost runner) leaves the branch: delete it with `gh api --method DELETE repos/wehagy/openwrt-ci-packages/git/refs/heads/upstream-overlay/update-netbird-<run id>-<attempt>`. |
-| `publish` | token job 2 (`environment: review`). Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description names what each line built: line `main` the review repository at the bump commit, line `25.12` "overlay of net/netbird onto openwrt-25.12 @ <sha of that branch>" with the overlay commit of this repository; a failure of `25.12` is the backport check failing (for example a Go version `openwrt-25.12` does not have), and the pull request still opens. The description has a section "Test suites that ran": the generic QEMU test ran; the package runtime tests (`packages/netbird/tests`) are `NOT RUN` when the directory does not exist, and run (tests that need `NB_SETUP_KEY` run only when that secret is set, otherwise skip) when it does, with a warning that a skipped test is not a pass; a green QEMU test never reads as a runtime pass. |
+| `cleanup` | deletes the overlay branch (`scripts/upstream-pr/cleanup.sh`, only under `upstream-overlay/`) once `build-25-12` is done, on success, failure and cancellation, also when `compose` failed after its push (no branch: it only says so). `contents: write`. A killed run (forced cancellation, lost runner) leaves the branch: delete it with `gh api --method DELETE repos/wehagy/openwrt-ci-packages/git/refs/heads/upstream-overlay/update-<run id>-<attempt>`; the job `sweep` of a later run deletes such a branch once it is a day old. |
+| `sweep` | no `needs`, nothing waits for it. Deletes `upstream-overlay/update-*` branches of this repository older than 24 h (`scripts/upstream-pr/sweep.sh`, through `cleanup.sh` and its guards): the branch a killed run left, since `cleanup` cannot run in a dead run. Younger branches (a run in progress) and `upstream-overlay/pr*`/`custom-pr*` (other workflows) stay. `contents: write`, the `GITHUB_TOKEN`, no secret. It fails when a delete or the listing fails. |
+| `publish` | token job 2 (`environment: review`). Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description names what each line built: line `main` the review repository at the bump commit, line `25.12` "overlay of net/netbird onto openwrt-25.12 @ <sha of that branch>" with the overlay commit of this repository; a failure of `25.12` is the backport check failing (for example a Go version `openwrt-25.12` does not have), and the pull request still opens. The description has a section "Test suites that ran", counted from the `results.xml` that every QEMU job uploads (`publish` downloads them with `gh run download`): per line, the generic test and the package tests (`packages/netbird/tests`) with passed / skipped / failed and the targets, the names of the secrets the test jobs pass (`test_secrets`, here `NB_SETUP_KEY`), every skipped test with its reason, a failed one, and a target whose job left no result file; `NOT RUN` when the directory does not exist. A skipped test is flagged as not a pass, and a green QEMU job never reads as a runtime pass. The `Run tested` line of the upstream link carries the same package test counts of line `main`. The row `Upstream base` of the description holds the base commit and its relation to `openwrt/packages` master (see "Production guard") |
 
 - Start: daily at 05:17 UTC (the schedule runs from the default branch only) and
   `workflow_dispatch` with the optional input `version` (`X.Y.Z`, newer than the
@@ -220,6 +222,21 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
   work. Production: `review_repository: wehagy/packages` (the fork); do this
   only with the owner's approval, with a token for that repository. For a fork
   the description links `.../openwrt/packages/compare/master...<owner>:<repo>:<branch>?expand=1&title=...&body=...`.
+- Production guard (`scripts/check-fork-base.sh`, step of `detect`, so before
+  `prepare` pushes anything): when the review repository is a fork, the update
+  branch is the base for a pull request against `openwrt/packages` `master`, so
+  `detect` compares `master...<owner>:<review_branch>` (read only, no token).
+  Extra commits on the fork (`ahead_by` > 0: ahead or diverged) fail the job
+  with an `::error::`: they would travel into the upstream pull request. A fork
+  identical to `master`, or only behind it, passes, and the row `Upstream base`
+  of the description states the relation and the base commit (`identical to
+  openwrt/packages master @ <sha>`, or `base commit <sha>, N commit(s) behind
+  openwrt/packages master (<sha>)`; a fork that lags still gets a pull request
+  that holds the bump alone, built and tested on the older base the row names).
+  For the test copy (`wehagy/w`, not a fork) nothing is asked and the row says
+  `not a fork: upstream link not functional`. Proved offline with stubs for
+  both modes (`flow-selftest.sh`); the call itself was read against GitHub with
+  another fork (`status`, `ahead_by`, `behind_by`, `base_commit`).
 - One run at a time: `concurrency` group `update-netbird`, `cancel-in-progress:
   false`. A second run (the schedule and a manual dispatch) waits; GitHub keeps
   one pending run per group, so a newer pending run replaces the older one.
@@ -243,9 +260,8 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
   `environment: review`. `secrets: inherit` passes the repository and
   organization secrets, never an environment's, and a job that calls a reusable
   workflow (`uses:`) cannot declare an environment. So the test jobs
-  (`secrets: inherit` plus `test_secrets: NB_SETUP_KEY`, which makes the NetBird
-  runtime tests able to run once `packages/netbird/tests` exists) cannot see
-  the token. A job that runs package code (build, test, image) must never
+  (`secrets: inherit` plus `test_secrets: NB_SETUP_KEY`, which lets the NetBird
+  runtime tests of `packages/netbird/tests` run) cannot see the token. A job that runs package code (build, test, image) must never
   declare `environment: review`. A repository secret of the same name would be
   passed on by `inherit`: do not create one.
 - The hash is the sha256 of the source archive (`scripts/source-sha256.sh`), not
