@@ -19,7 +19,9 @@ found=0
 for file in "$1"/line-result-*/result.json; do
 	[ -f "${file}" ] || continue
 	found=1
-	jq -r '"| \(.package) | \(.line) | \(.build) | \(.test) | \(.image) | \(if .passed then "passed" else "**FAILED**" end) |"' "${file}"
+	# The files travel as artifacts: only plain words reach the summary.
+	jq -r 'def plain: tostring | gsub("[^A-Za-z0-9._ -]"; "?") | .[:40];
+		"| \(.package | plain) | \(.line | plain) | \(.build | plain) | \(.test | plain) | \(.image | plain) | \(if .passed == true then "passed" else "**FAILED**" end) |"' "${file}"
 done
 if [ "${found}" -eq 0 ]; then
 	echo "| (no line result) | | | | | |"

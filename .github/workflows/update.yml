@@ -366,7 +366,7 @@ jobs:
         run: scripts/upstream-pr/compose-lines.sh
 
   # One leg per line (line.yml), all in parallel: build, QEMU test, images. A
-  # failed leg does not stop the others (fail-fast: false), and each leg writes
+  # failed leg does not stop the others (the matrix does not fail fast), and each leg writes
   # its own artifact line-result-<package>-<line>. packages: write because
   # build.yml may rebuild the SDK image (see README.md).
   # tests_path: a missing directory means only the generic test runs.
@@ -560,6 +560,7 @@ jobs:
           LINES: ${{ needs.detect.outputs.lines }}
           REFERENCE: ${{ needs.detect.outputs.reference }}
           RESULTS_DIR: line-results
+          JOBS_FILE: jobs.jsonl
           MATRIX: ${{ needs.compose.outputs.matrix }}
           REPORT_PASSED: ${{ steps.report.outputs.reference_passed }}
         run: scripts/decide.sh | tee -a "${GITHUB_OUTPUT}"

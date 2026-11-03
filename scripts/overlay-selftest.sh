@@ -191,6 +191,12 @@ got=$(lines_output matrix '[.include[1:][].feed_repository] | unique | join(" ")
 eq "compose-lines: the other lines build this repository" "${got}" wehagy/openwrt-ci-packages
 sha_25=$(lines_output overlays '.["25.12"].sha')
 sha_26=$(lines_output overlays '.["26.12"].sha')
+got=$(lines_output overlays 'keys | join(" ")')
+eq "compose-lines: the overlays are keyed by the lines other than the reference" "${got}" "25.12 26.12"
+got=$(lines_output overlays '[.[].sha | select(test("\\A[0-9a-f]{40}\\z"))] | length')
+eq "compose-lines: every overlay has a full commit SHA" "${got}" 2
+got=$(lines_output overlays '.["main"].sha // "missing"')
+eq "compose-lines: the reference line has no overlay (a leg reading it gets nothing)" "${got}" missing
 got=$(lines_output matrix '[.include[1:][].feed_ref] | join(" ")')
 eq "compose-lines: each line builds its own overlay commit" "${got}" "${sha_25} ${sha_26}"
 check "compose-lines: the overlay commits differ" "${sha_25}" test "${sha_25}" != "${sha_26}"
@@ -297,15 +303,44 @@ put_result 26.12 success success success "${sha_c}"
 check "line-summary: the failed line is a row of its own" "${work}/sum.md" has "${work}/sum.md" "| netbird | 25.12 | failure | skipped | skipped | **FAILED** |"
 check "line-summary: the passing lines are rows too" "${work}/sum.md" has "${work}/sum.md" "| netbird | 26.12 | success | success | success | passed |"
 
+# Write the job list of the run (what the jobs API gives) with one job
+# `result` per leg, named as the matrix names it:
+# "lines (<line>, <repository>, <commit>) / result".
+#
+# Arguments:
+#   $1  <line>:<conclusion> for each leg whose job `result` is in the list,
+#       separated by spaces
+write_jobs() {
+	: >"${work}/jobs.jsonl"
+	for wj_leg in $1; do
+		jq -c -n --arg line "${wj_leg%%:*}" --arg conclusion "${wj_leg#*:}" --arg sha "${sha_a}" \
+			'{name: ("lines (" + $line + ", wehagy/w, " + $sha + ") / result"), conclusion: $conclusion}' >>"${work}/jobs.jsonl"
+	done
+	printf '%s\n' '{"name": "lines (main, wehagy/w, x) / build / feed main", "conclusion": "success"}' >>"${work}/jobs.jsonl"
+}
+# The legs whose job `result` run_decide lists; a case that changes it puts it back.
+dec_jobs="main:success 25.12:success 26.12:success"
+# Text of a result file never reaches the summary but as plain words.
+put_raw_summary() {
+	mkdir -p "${work}/hres/line-result-netbird-main"
+	printf '%s' '{"line":"[click](http://evil.example) @x","package":"netbird","build":"success\n# h","test":"success","image":"success","passed":true}' >"${work}/hres/line-result-netbird-main/result.json"
+}
+put_raw_summary
+"${script_dir}/line-summary.sh" "${work}/hres" >"${work}/hsum.md"
+check "line-summary: hostile text is plain words" "${work}/hsum.md" has "${work}/hsum.md" "| netbird | ?click??http???evil.example? ?x | success?? h | success | success | passed |"
+check "line-summary: no link survives" "${work}/hsum.md" lacks "${work}/hsum.md" "](http"
+
 # Run decide.sh with the three lines (main is the reference); sets dec_rc and the
 # files dec.out (stdout) and dec.log (stderr). Everything passed, with the right
-# commits, unless overridden.
+# commits and all the jobs `result` green, unless overridden.
 #
 # Arguments:
 #   $@  overrides of the environment
 run_decide() {
 	dec_rc=0
+	write_jobs "${dec_jobs}"
 	env PACKAGE=netbird LINES="main 25.12 26.12" REFERENCE=main RESULTS_DIR="${work}/res" REPORT_PASSED=true \
+		JOBS_FILE="${work}/jobs.jsonl" \
 		MATRIX="{\"include\":[{\"line\":\"main\",\"feed_ref\":\"${sha_a}\"},{\"line\":\"25.12\",\"feed_ref\":\"${sha_b}\"},{\"line\":\"26.12\",\"feed_ref\":\"${sha_c}\"}]}" \
 		"$@" sh "${script_dir}/decide.sh" >"${work}/dec.out" 2>"${work}/dec.log" || dec_rc=$?
 }
@@ -386,6 +421,125 @@ check "decide: with 25.12 removed: never mentions it" "${work}/dec.log" lacks "$
 # A package with only the reference line.
 run_decide LINES=main MATRIX="{\"include\":[{\"line\":\"main\",\"feed_ref\":\"${sha_a}\"}]}"
 check "decide: only the reference line: opens" "${work}/dec.out" has "${work}/dec.out" "open=true"
+
+# --- decide.sh: a result file is believed only with its job `result` and only
+# when it is well formed; `passed` is computed, not read ----------------------
+# Write a result file as is.
+#
+# Arguments:
+#   $1  line  $2  the text of the file
+put_raw() {
+	mkdir -p "${work}/res/line-result-netbird-$1"
+	printf '%s' "$2" >"${work}/res/line-result-netbird-$1/result.json"
+}
+reset_results() {
+	rm -rf "${work}/res"
+	put_result main success success success "${sha_a}"
+	put_result 25.12 success success success "${sha_b}"
+	put_result 26.12 success success success "${sha_c}"
+	dec_jobs="main:success 25.12:success 26.12:success"
+}
+reset_results
+dec_jobs="main:success 26.12:success"
+run_decide
+check "decide: no job result for 25.12: its file is not believed" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=no result test=no result image=no result passed=false"
+check "decide: no job result for 25.12: says why" "${work}/dec.log" has "${work}/dec.log" "line 25.12: its result file is not believed: the job result of its leg did not succeed"
+check "decide: no job result for 25.12: the others still open" "${work}/dec.out" has "${work}/dec.out" "open=true"
+reset_results
+dec_jobs="25.12:success 26.12:success"
+run_decide
+check "decide: no job result for the reference line: no pull request" "${work}/dec.out" has "${work}/dec.out" "open=false"
+reset_results
+for conclusion in failure cancelled skipped; do
+	dec_jobs="main:${conclusion} 25.12:success 26.12:success"
+	run_decide
+	check "decide: job result of the reference ${conclusion}: no pull request" "${work}/dec.out" has "${work}/dec.out" "open=false"
+done
+reset_results
+dec_jobs="main:success 25.12:success 26.12:success 26.12:failure"
+run_decide
+check "decide: one of two job results failed: no pull request for that line" "${work}/dec.log" has "${work}/dec.log" "line 26.12: build=no result"
+reset_results
+# The line is the first value of the name, and its dots are dots.
+decide_two() {
+	dec_rc=0
+	env PACKAGE=netbird LINES="main 25.12" REFERENCE=main RESULTS_DIR="${work}/res" REPORT_PASSED=true JOBS_FILE="${work}/jobs.jsonl" \
+		MATRIX="{\"include\":[{\"line\":\"main\",\"feed_ref\":\"${sha_a}\"},{\"line\":\"25.12\",\"feed_ref\":\"${sha_b}\"}]}" \
+		sh "${script_dir}/decide.sh" >"${work}/dec.out" 2>"${work}/dec.log" || dec_rc=$?
+}
+printf '%s\n' '{"name": "lines (25.12, main) / result", "conclusion": "success"}' >"${work}/jobs.jsonl"
+decide_two
+check "decide: main is not vouched for by a job whose second value is main" "${work}/dec.out" has "${work}/dec.out" "open=false"
+check "decide: ... while 25.12 is vouched for by its own name" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=success"
+printf '%s\n' '{"name": "lines (main) / result", "conclusion": "success"}' '{"name": "lines (25x12) / result", "conclusion": "success"}' >"${work}/jobs.jsonl"
+decide_two
+check "decide: 25x12 does not vouch for 25.12" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=no result"
+printf '%s\n' '{"name": "lines (main2) / result", "conclusion": "success"}' '{"name": "lines (25.12-1, x) / result", "conclusion": "success"}' >"${work}/jobs.jsonl"
+decide_two
+check "decide: main2 does not vouch for main" "${work}/dec.out" has "${work}/dec.out" "open=false"
+check "decide: 25.12-1 does not vouch for 25.12" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=no result"
+dec_jobs="main:success 25.12:success 26.12:success"
+dec_rc=0
+env PACKAGE=netbird LINES=main REFERENCE=main RESULTS_DIR="${work}/res" REPORT_PASSED=true JOBS_FILE="${work}/none.jsonl" \
+	MATRIX="{\"include\":[{\"line\":\"main\",\"feed_ref\":\"${sha_a}\"}]}" \
+	sh "${script_dir}/decide.sh" >"${work}/dec.out" 2>"${work}/dec.log" || dec_rc=$?
+check "decide: no job list: fails" "${work}/dec.log" failed "${dec_rc}"
+check "decide: no job list: no decision" "${work}/dec.out" lacks "${work}/dec.out" "open="
+
+# `passed` of the file is not read: build failure with passed true is no pass.
+reset_results
+put_raw main "{\"line\":\"main\",\"package\":\"netbird\",\"build\":\"failure\",\"test\":\"success\",\"image\":\"success\",\"feed_sha\":\"\",\"passed\":true}"
+run_decide
+check "decide: a forged passed=true of the reference is not a pass" "${work}/dec.out" has "${work}/dec.out" "open=false"
+check "decide: ... and it is computed as false" "${work}/dec.log" has "${work}/dec.log" "line main: build=failure test=success image=success passed=false"
+reset_results
+put_raw main "{\"line\":\"main\",\"package\":\"netbird\",\"build\":\"success\",\"test\":\"success\",\"image\":\"success\",\"feed_sha\":\"${sha_a}\"}"
+run_decide
+check "decide: a file with no passed field still passes when the results do" "${work}/dec.out" has "${work}/dec.out" "open=true"
+reset_results
+put_raw main "{\"line\":\"main\",\"package\":\"netbird\",\"build\":\"success\",\"test\":\"success\",\"image\":\"not requested\",\"feed_sha\":\"${sha_a}\",\"passed\":false}"
+run_decide
+check "decide: images not requested pass whatever passed says" "${work}/dec.out" has "${work}/dec.out" "open=true"
+
+# Malformed files are no result: a hostile text never reaches a log or a PR.
+evil='[click](http://evil.example) @someone'
+for case_name in sha:"\"feed_sha\":\"${evil}\"" newline:"\"feed_sha\":\"${sha_a}\\n\"" short:"\"feed_sha\":\"abc\"" upper:"\"feed_sha\":\"$(printf '%s' "${sha_a}" | tr a-f A-F)\"" number:"\"feed_sha\":7"; do
+	name=${case_name%%:*}
+	field=${case_name#*:}
+	reset_results
+	put_raw main "{\"line\":\"main\",\"package\":\"netbird\",\"build\":\"success\",\"test\":\"success\",\"image\":\"success\",${field}}"
+	run_decide
+	check "decide: the reference with a bad feed_sha (${name}): no pull request" "${work}/dec.out" has "${work}/dec.out" "open=false"
+	check "decide: ... (${name}): the file is not believed" "${work}/dec.log" has "${work}/dec.log" "line main: its result file is not believed: it is malformed"
+	check "decide: ... (${name}): the text is not printed" "${work}/dec.log" lacks "${work}/dec.log" "evil.example"
+	reset_results
+	put_raw 25.12 "{\"line\":\"25.12\",\"package\":\"netbird\",\"build\":\"success\",\"test\":\"success\",\"image\":\"success\",${field}}"
+	run_decide
+	check "decide: 25.12 with a bad feed_sha (${name}): it has no result, main still opens" "${work}/dec.out" has "${work}/dec.out" "open=true"
+	check "decide: ... (${name}): 25.12 has no result" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=no result"
+done
+for case_name in build:'"build":"[x](http://e.example)","test":"success","image":"success"' test:'"build":"success","test":"success\n# h","image":"success"' image:'"build":"success","test":"success","image":null'; do
+	name=${case_name%%:*}
+	reset_results
+	put_raw main "{\"line\":\"main\",\"package\":\"netbird\",${case_name#*:},\"feed_sha\":\"${sha_a}\"}"
+	run_decide
+	check "decide: an unknown ${name} result: no pull request" "${work}/dec.out" has "${work}/dec.out" "open=false"
+done
+reset_results
+put_raw main "{\"line\":\"25.12\",\"package\":\"netbird\",\"build\":\"success\",\"test\":\"success\",\"image\":\"success\",\"feed_sha\":\"${sha_a}\"}"
+run_decide
+check "decide: a file that names another line is not believed" "${work}/dec.out" has "${work}/dec.out" "open=false"
+reset_results
+put_raw main "{\"line\":\"main\",\"package\":\"other\",\"build\":\"success\",\"test\":\"success\",\"image\":\"success\",\"feed_sha\":\"${sha_a}\"}"
+run_decide
+check "decide: a file that names another package is not believed" "${work}/dec.out" has "${work}/dec.out" "open=false"
+for raw in '["not","an","object"]' '{not json' '7' ''; do
+	reset_results
+	put_raw main "${raw}"
+	run_decide
+	check "decide: a file that is not a result object (${raw:-empty}): no pull request" "${work}/dec.out" has "${work}/dec.out" "open=false"
+done
+reset_results
 
 # The bump moved after prepare: refuse, push nothing.
 git -C "${work}/src" commit -q --allow-empty -m "another commit"
@@ -712,6 +866,8 @@ check "wiring: the decision runs decide.sh" "decide" has "${workflow}" "run: scr
 decide_env='.jobs.publish.steps[] | select(.id == "decide").env'
 got=$(wf "${decide_env}.MATRIX")
 eq "wiring: the decision checks the commits compose asked each line to build" "${got}" "\${{ needs.compose.outputs.matrix }}"
+got=$(wf "${decide_env}.JOBS_FILE")
+eq "wiring: the decision reads the job list the description was built from" "${got}" jobs.jsonl
 got=$(wf "${decide_env}.REPORT_PASSED")
 eq "wiring: the decision also takes the verdict of the description" "${got}" "\${{ steps.report.outputs.reference_passed }}"
 # The per-line outcome comes from the artifacts of the legs. The aggregate
