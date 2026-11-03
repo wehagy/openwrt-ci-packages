@@ -87,14 +87,33 @@ expect_refused() {
 # config.sh
 # ---------------------------------------------------------------------------
 cfg=${here}/config.sh
+# The real configuration only has to be readable; the values are checked on a
+# fixture, so that a throwaway config (a proof branch) does not break this test.
 export PACKAGES_DIR="${root}/packages"
+expect_line "config: the real netbird config is readable" "package=netbird" "${cfg}" netbird
+fx=${work}/fx
+mkdir -p "${fx}/netbird"
+cat >"${fx}/netbird/config.yml" <<'EOF'
+package: netbird
+memory: 256M
+apk_timeout: 120
+images:
+  packages: luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut
+  profiles:
+    - x86/64/generic
+    - ath79/generic/tplink_archer-c7-v4:too-big
+    - ramips/mt7621/glinet_gl-mt1300
+  limits:
+    ramips/mt7621/glinet_gl-mt1300: 33226752
+EOF
+export PACKAGES_DIR="${fx}"
 expect_line "config: package" "package=netbird" "${cfg}" netbird
 expect_line "config: extra packages" "packages=luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut" "${cfg}" netbird
-expect_line "config: memory override of netbird" "memory=256M" "${cfg}" netbird
-expect_line "config: apk timeout of netbird" "apk_timeout=120" "${cfg}" netbird
+expect_line "config: memory override" "memory=256M" "${cfg}" netbird
+expect_line "config: apk timeout" "apk_timeout=120" "${cfg}" netbird
 expect_line "config: no targets means the base default" "targets=" "${cfg}" netbird
-expect_line "config: limits" "limits=ramips/mt7621/glinet_gl-mt1300 33226752 ath79/generic/buffalo_wzr-hp-g450h 33030144" "${cfg}" netbird
-expect_line "config: first profile" "profiles=x86/64/generic mediatek/filogic/xiaomi_mi-router-ax3000t-ubootmod mediatek/filogic/acer_predator-w6x-stock mediatek/filogic/bananapi_bpi-r3 ath79/generic/tplink_archer-c7-v4:too-big ramips/mt7621/totolink_x5000r:too-big ramips/mt7621/glinet_gl-mt1300 ath79/generic/buffalo_wzr-hp-g450h" "${cfg}" netbird
+expect_line "config: limits" "limits=ramips/mt7621/glinet_gl-mt1300 33226752" "${cfg}" netbird
+expect_line "config: profiles keep :too-big" "profiles=x86/64/generic ath79/generic/tplink_archer-c7-v4:too-big ramips/mt7621/glinet_gl-mt1300" "${cfg}" netbird
 expect_refused "config: unknown package" "is not a package of this repository" "${cfg}" nope
 expect_refused "config: invalid package name" "invalid package name" "${cfg}" 'Net;bird'
 expect_refused "config: no argument" "usage" "${cfg}"
@@ -119,7 +138,7 @@ expect_refused "config: newline in a value cannot forge a command" "targets has 
 # ---------------------------------------------------------------------------
 # custom.sh (the form)
 # ---------------------------------------------------------------------------
-export PACKAGES_DIR="${root}/packages"
+export PACKAGES_DIR="${fx}"
 cu=${here}/custom.sh
 # Run custom.sh with a form: the defaults are a valid form, "NAME=value"
 # arguments override them.
