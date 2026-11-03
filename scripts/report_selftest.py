@@ -1,7 +1,8 @@
 """Responsibility: self-test of scripts/report.py with fixed jobs and artifacts:
-the verdict of a line, the image outcomes (fits / too big as expected), the
-failure detail and the upstream link, which must name only the review
-repository's branch. No network.
+the verdict of every line of a package (two lines, three lines with a fake
+"26.12", one line removed; a failing line next to passing ones), the image
+outcomes (fits / too big as expected), the failure detail and the upstream link,
+which must name only the review repository's branch. No network.
 
 Usage:
     python3 scripts/report_selftest.py
@@ -10,6 +11,8 @@ Environment variables: none.
 """
 
 import argparse
+import contextlib
+import io
 import json
 import os
 import re
@@ -23,6 +26,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import report
 
+# The lines of the package in the tests: the data of a fixture, in the order of
+# a config.yml; "main" is the reference line. THIRD is a fake line that does not
+# exist in the base, to prove that nothing in report.py knows the lines.
+LINES = ["main", "25.12"]
+REFERENCE = "main"
+THIRD = "26.12"
 ARCHS = ["x86_64", "aarch64_generic", "mips_24kc"]
 TARGETS = ["x86-64", "malta-be"]
 PROFILES = ["x86-64-generic", "tplink-archer-c7-v4"]
@@ -30,20 +39,21 @@ PROFILES = ["x86-64-generic", "tplink-archer-c7-v4"]
 
 def job(stage: str, line: str, item: str, conclusion: str = "success") -> dict:
     """A record as the workflow extracts it from the jobs API."""
-    outer = f"{stage}-{'25-12' if line == '25.12' else 'main'}"
     return {
-        "name": f"{outer} / {line} {item}",
+        "name": f"lines ({line}) / {stage} / {line} {item}",
         "conclusion": conclusion,
         "html_url": f"https://example.invalid/jobs/{stage}-{line}-{item}",
         "failed_steps": ["Run tests"] if conclusion == "failure" else [],
     }
 
 
-def all_jobs(failing: dict[tuple[str, str], str] | None = None) -> list[dict]:
-    """Every worker job of both lines, plus setup jobs that must be ignored."""
+def all_jobs(
+    failing: dict[tuple[str, str], str] | None = None, lines: list[str] | None = None
+) -> list[dict]:
+    """Every worker job of the lines, plus setup jobs that must be ignored."""
     failing = failing or {}
     records = []
-    for line in report.LINES:
+    for line in lines or LINES:
         for stage, items in (
             ("build", ARCHS),
             ("test", TARGETS),
@@ -52,7 +62,9 @@ def all_jobs(failing: dict[tuple[str, str], str] | None = None) -> list[dict]:
             for item in items:
                 state = failing.get((line, f"{stage}/{item}"), "success")
                 records.append(job(stage, line, item, state))
-        records.append({"name": f"build-{line} / feed {line}", "conclusion": "failure"})
+        records.append(
+            {"name": f"lines ({line}) / build / feed {line}", "conclusion": "failure"}
+        )
         records.append({"name": "detect", "conclusion": "success"})
     return records
 
@@ -70,12 +82,12 @@ def args_for(**extra: str) -> argparse.Namespace:
         "update_branch": "ci/netbird-update-0.82.0",
         "base_sha": "a" * 40,
         "head_sha": "b" * 40,
-        "feed_sha_main": "b" * 40,
-        "feed_sha_25_12": "c" * 40,
+        "lines": " ".join(LINES),
+        "reference": REFERENCE,
+        "overlays": "{}",
+        "line_results": "",
         "overlay_repository": "wehagy/openwrt-ci-packages",
         "overlay_dirs": "net/netbird",
-        "overlay_base_branch": "openwrt-25.12",
-        "overlay_base_sha": "d" * 40,
         "run_url": "https://example.invalid/runs/1",
         "package_tests": "none",
         "upstream_base": "not a fork: upstream link not functional",
@@ -83,7 +95,49 @@ def args_for(**extra: str) -> argparse.Namespace:
         "results": "",
     }
     values.update(extra)
+    if "line_list" not in values:
+        values["line_list"] = values["lines"].split()
     return argparse.Namespace(**values)
+
+
+def overlays_for(lines: list[str]) -> dict:
+    """What compose-lines.sh reports for the lines other than the reference."""
+    return {
+        line: {
+            "branch": f"upstream-overlay/update-1-1-{line}",
+            "sha": chr(ord("c") + n) * 40,
+            "base_sha": chr(ord("d") + n) * 40,
+            "base_branch": f"openwrt-{line}" if line != REFERENCE else "master",
+        }
+        for n, line in enumerate(x for x in lines if x != REFERENCE)
+    }
+
+
+def result_for(line: str, lines: list[str], **override: str) -> dict:
+    """The result file of a passing line (scripts/line-result.sh)."""
+    sha = "b" * 40 if line == REFERENCE else overlays_for(lines)[line]["sha"]
+    data = {
+        "line": line,
+        "package": "netbird",
+        "build": "success",
+        "test": "success",
+        "image": "success",
+        "feed_sha": sha,
+        "passed": True,
+    }
+    data.update(override)
+    return data
+
+
+def all_results(lines: list[str] | None = None) -> dict:
+    """The result file of every line, all passing."""
+    return {
+        line: result_for(
+            line,
+            lines or LINES,
+        )
+        for line in lines or LINES
+    }
 
 
 def junit(generic: tuple[int, int, int], package: tuple[int, int, int]) -> str:
@@ -129,9 +183,7 @@ def write_results(
 def every_target(generic: tuple[int, int, int], package: tuple[int, int, int]) -> dict:
     """The same junit for every target of both lines."""
     return {
-        (line, target): junit(generic, package)
-        for line in report.LINES
-        for target in TARGETS
+        (line, target): junit(generic, package) for line in LINES for target in TARGETS
     }
 
 
@@ -146,8 +198,7 @@ HOSTILE_MESSAGE = (
 HEADINGS = {
     "## Test suites that ran",
     "## Results",
-    "### Line `main`: passed",
-    "### Line `25.12`: passed",
+    *(f"### Line `{line}`: passed" for line in LINES),
     "## Upstream pull request",
 }
 
@@ -177,22 +228,36 @@ class ReportTest(unittest.TestCase):
     """Cases of scripts/report.py."""
 
     def body(
-        self, failing=None, results=None, **extra: str
+        self, failing=None, results=None, lines=None, line_results=None, **extra
     ) -> tuple[str, list[report.Job]]:
-        jobs = report.parse_jobs(all_jobs(failing))
+        """The description; line_results overrides the result file of a line
+        (a dict of fields, or None to leave the file out)."""
+        lines = lines or LINES
+        jobs = report.parse_jobs(all_jobs(failing, lines), lines)
         with tempfile.TemporaryDirectory() as tmp:
             write_results(tmp, results or {})
-            found = report.parse_results(tmp, "netbird")
-        return report.build_body(args_for(**extra), jobs, ARTIFACTS, found), jobs
+            found = report.parse_results(tmp, "netbird", lines)
+        files = all_results(lines)
+        for line, override in (line_results or {}).items():
+            if override is None:
+                del files[line]
+            else:
+                files[line] = override
+        overlays = extra.pop("overlays", overlays_for(lines))
+        args = args_for(lines=" ".join(lines), **extra)
+        self.files = files
+        return report.build_body(args, jobs, ARTIFACTS, found, files, overlays), jobs
 
     def test_setup_jobs_are_ignored(self) -> None:
-        jobs = report.parse_jobs(all_jobs())
-        self.assertEqual(len(jobs), 2 * (len(ARCHS) + len(TARGETS) + len(PROFILES)))
+        jobs = report.parse_jobs(all_jobs(), LINES)
+        self.assertEqual(
+            len(jobs), len(LINES) * (len(ARCHS) + len(TARGETS) + len(PROFILES))
+        )
 
     def test_both_lines_pass(self) -> None:
         body, jobs = self.body()
-        self.assertTrue(report.line_passed(jobs, "main"))
-        self.assertTrue(report.line_passed(jobs, "25.12"))
+        self.assertTrue(report.line_passed(jobs, "main", self.files))
+        self.assertTrue(report.line_passed(jobs, "25.12", self.files))
         self.assertIn("| `main` passed | passed (3/3) | passed (2/2) |", body)
         self.assertIn("passed (2/2): 1 too big as expected |", body)
         self.assertIn("| Built (line `main`) | wehagy/w @ `" + "b" * 40 + "` |", body)
@@ -211,30 +276,176 @@ class ReportTest(unittest.TestCase):
         self.assertIn("| Image | `x86-64-generic` | fits |", body)
         self.assertIn("| Image | `tplink-archer-c7-v4` | too big (expected) |", body)
 
-    def test_25_12_failure_keeps_main_passing(self) -> None:
-        body, jobs = self.body({("25.12", "test/malta-be"): "failure"})
-        self.assertTrue(report.line_passed(jobs, "main"))
-        self.assertFalse(report.line_passed(jobs, "25.12"))
+    def test_other_line_failure_keeps_the_reference_passing(self) -> None:
+        failed = result_for("25.12", LINES, test="failure", passed=False)
+        body, jobs = self.body(
+            {("25.12", "test/malta-be"): "failure"}, line_results={"25.12": failed}
+        )
+        self.assertTrue(report.line_passed(jobs, "main", self.files))
+        self.assertFalse(report.line_passed(jobs, "25.12", self.files))
         self.assertIn("| `25.12` **FAILED** |", body)
         self.assertIn("**failure** (step: Run tests) [log](", body)
         self.assertIn("Line `25.12` did not pass", body)
+        self.assertIn("because the reference line `main` passed", body)
 
-    def test_25_12_failure_says_it_is_the_backport_check(self) -> None:
-        body, _ = self.body({("25.12", "build/mips_24kc"): "failure"})
+    def test_a_failed_line_says_it_is_the_backport_check(self) -> None:
+        failed = result_for("25.12", LINES, build="failure", passed=False)
+        body, _ = self.body(
+            {("25.12", "build/mips_24kc"): "failure"}, line_results={"25.12": failed}
+        )
         self.assertIn("only `net/netbird` of the bump on `openwrt-25.12`", body)
 
-    def test_25_12_not_built_says_so(self) -> None:
-        body, _ = self.body(feed_sha_25_12="")
+    def test_a_line_not_built_says_so(self) -> None:
+        body, _ = self.body(
+            line_results={"25.12": result_for("25.12", LINES, feed_sha="")}
+        )
         self.assertIn("@ " + "d" * 40 + ": **not built** |", body)
 
-    def test_main_failure_fails_the_line(self) -> None:
-        _, jobs = self.body({("main", "build/mips_24kc"): "failure"})
-        self.assertFalse(report.line_passed(jobs, "main"))
+    def test_the_reference_failure_fails_the_line(self) -> None:
+        failed = result_for("main", LINES, build="failure", passed=False)
+        _, jobs = self.body(
+            {("main", "build/mips_24kc"): "failure"}, line_results={"main": failed}
+        )
+        self.assertFalse(report.line_passed(jobs, "main", self.files))
 
     def test_missing_stage_fails_the_line(self) -> None:
-        records = [r for r in all_jobs() if not r["name"].startswith("image-main")]
-        jobs = report.parse_jobs(records)
-        self.assertFalse(report.line_passed(jobs, "main"))
+        records = [
+            r for r in all_jobs() if not r["name"].startswith("lines (main) / image")
+        ]
+        jobs = report.parse_jobs(records, LINES)
+        self.assertFalse(report.line_passed(jobs, "main", all_results()))
+
+    def test_a_line_needs_its_result_file_and_the_job_list_to_agree(self) -> None:
+        jobs = report.parse_jobs(all_jobs(), LINES)
+        green = all_results()
+        self.assertTrue(report.line_passed(jobs, "main", green))
+        # The jobs are green but the leg's own file says the line failed.
+        red = dict(green, main=result_for("main", LINES, test="failure", passed=False))
+        self.assertFalse(report.line_passed(jobs, "main", red))
+        # The file says passed but a job of the run failed.
+        failing = report.parse_jobs(
+            all_jobs({("main", "test/malta-be"): "failure"}), LINES
+        )
+        self.assertFalse(report.line_passed(failing, "main", green))
+        # No file at all: the line cannot be told to have passed.
+        self.assertFalse(report.line_passed(jobs, "main", {"25.12": green["25.12"]}))
+
+    def test_a_missing_result_file_is_said(self) -> None:
+        body, _ = self.body(line_results={"25.12": None})
+        self.assertIn("| `25.12` **FAILED** |", body)
+        self.assertIn("Its result file is missing", body)
+        self.assertIn("| `main` passed |", body)
+
+    def test_three_lines_one_failing_and_two_passing(self) -> None:
+        lines = ["main", "25.12", THIRD]
+        failed = result_for("25.12", lines, test="failure", passed=False)
+        body, jobs = self.body(
+            {("25.12", "test/x86-64"): "failure"},
+            lines=lines,
+            line_results={"25.12": failed},
+        )
+        self.assertTrue(report.line_passed(jobs, "main", self.files))
+        self.assertFalse(report.line_passed(jobs, "25.12", self.files))
+        self.assertTrue(report.line_passed(jobs, THIRD, self.files))
+        self.assertIn("| `main` passed |", body)
+        self.assertIn("| `25.12` **FAILED** |", body)
+        self.assertIn(f"| `{THIRD}` passed |", body)
+        self.assertIn(f"### Line `{THIRD}`: passed", body)
+        self.assertIn("Line `25.12` did not pass", body)
+        self.assertNotIn(f"Line `{THIRD}` did not pass", body)
+        self.assertIn(
+            f"| Built (line `{THIRD}`) | overlay of net/netbird onto openwrt-{THIRD} @ "
+            + "e" * 40
+            + ": wehagy/openwrt-ci-packages @ `"
+            + "d" * 40
+            + "` |",
+            body,
+        )
+
+    def test_the_third_line_failing_leaves_the_other_two_passing(self) -> None:
+        lines = ["main", "25.12", THIRD]
+        failed = result_for(THIRD, lines, build="failure", passed=False)
+        body, jobs = self.body(
+            {(THIRD, "build/x86_64"): "failure"},
+            lines=lines,
+            line_results={THIRD: failed},
+        )
+        self.assertTrue(report.line_passed(jobs, "25.12", self.files))
+        self.assertFalse(report.line_passed(jobs, THIRD, self.files))
+        self.assertIn(f"Line `{THIRD}` did not pass", body)
+        self.assertNotIn("Line `25.12` did not pass", body)
+        self.assertIn(f"only `net/netbird` of the bump on `openwrt-{THIRD}`", body)
+
+    def test_a_line_removed_from_the_package_is_not_mentioned(self) -> None:
+        lines = ["main", THIRD]
+        body, jobs = self.body(lines=lines)
+        self.assertNotIn("25.12", body)
+        self.assertTrue(report.line_passed(jobs, THIRD, self.files))
+        self.assertEqual(
+            {x for x in body.splitlines() if x.startswith("### Line")},
+            {"### Line `main`: passed", f"### Line `{THIRD}`: passed"},
+        )
+
+    def test_a_package_with_only_the_reference_line(self) -> None:
+        body, jobs = self.body(lines=["main"])
+        self.assertTrue(report.line_passed(jobs, "main", self.files))
+        self.assertNotIn("did not pass", body)
+
+    def test_an_overlay_that_could_not_be_composed_says_so(self) -> None:
+        overlays = overlays_for(LINES)
+        del overlays["25.12"]
+        body, _ = self.body(overlays=overlays, line_results={"25.12": None})
+        self.assertIn(
+            "| Built (line `25.12`) | overlay could not be composed: **not built** |",
+            body,
+        )
+
+    def test_the_reference_line_is_the_one_named_not_the_first(self) -> None:
+        lines = [THIRD, "main"]
+        failed = result_for(THIRD, lines, build="failure", passed=False)
+        body, jobs = self.body(
+            {(THIRD, "build/x86_64"): "failure"},
+            lines=lines,
+            line_results={THIRD: failed},
+        )
+        self.assertTrue(report.line_passed(jobs, "main", self.files))
+        self.assertIn(f"Line `{THIRD}` did not pass", body)
+
+    def test_line_results_are_read_per_line_and_checked(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for line, data in all_results(["main", "25.12", THIRD]).items():
+                directory = os.path.join(tmp, f"line-result-netbird-{line}")
+                os.makedirs(directory)
+                with open(os.path.join(directory, "result.json"), "w") as handle:
+                    json.dump(data, handle)
+            # A file of another package, or one that names another line, is no
+            # result of this line.
+            other = os.path.join(tmp, "line-result-netbird-lonely")
+            os.makedirs(other)
+            with open(os.path.join(other, "result.json"), "w") as handle:
+                json.dump(result_for("main", LINES), handle)
+            found = report.read_line_results(
+                tmp, "netbird", ["main", THIRD, "lonely", "gone"]
+            )
+            self.assertEqual(sorted(found), sorted(["main", THIRD]))
+            self.assertEqual(report.read_line_results(tmp, "other", ["main"]), {})
+
+    def test_job_names_do_not_depend_on_the_name_of_the_matrix_job(self) -> None:
+        for outer in ("lines (main)", "lines", "lines (netbird, main, pr)"):
+            jobs = report.parse_jobs(
+                [{"name": f"{outer} / test / main x86-64", "conclusion": "success"}],
+                LINES,
+            )
+            self.assertEqual(
+                [(j.stage, j.line, j.item) for j in jobs], [("test", "main", "x86-64")]
+            )
+        self.assertEqual(
+            report.parse_jobs(
+                [{"name": "detect"}, {"name": "lines (main) / build / feed main"}],
+                LINES,
+            ),
+            [],
+        )
 
     def test_upstream_link_names_the_review_branch(self) -> None:
         body, _ = self.body()
@@ -396,7 +607,7 @@ class ReportTest(unittest.TestCase):
                 os.makedirs(directory)
                 with open(os.path.join(directory, "results.xml"), "w") as handle:
                     handle.write(junit((1, 0, 0), (1, 0, 0)))
-            found = report.parse_results(tmp, "netbird")
+            found = report.parse_results(tmp, "netbird", LINES)
         self.assertEqual([r.target for r in found], ["x86-64"])
 
     def test_failed_tests_are_counted_and_missing_results_are_said(self) -> None:
@@ -442,7 +653,7 @@ class ReportTest(unittest.TestCase):
                 os.path.join(tmp, "qemu-netbird-main-malta-be"),
                 os.path.join(tmp, "qemu-other-main-malta-be"),
             )
-            found = report.parse_results(tmp, "netbird")
+            found = report.parse_results(tmp, "netbird", LINES)
         self.assertEqual([(r.line, r.target) for r in found], [("main", "x86-64")])
         self.assertEqual(found[0].package.passed, 7)
 
@@ -476,7 +687,7 @@ class ReportTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             argv = []
             for key, value in vars(args_for()).items():
-                if key not in ("package_tests", "results"):
+                if key not in ("package_tests", "results", "line_list"):
                     argv += [f"--{key.replace('_', '-')}", value]
             argv += ["--jobs", "j", "--artifacts", "a", "--results", tmp]
             argv += ["--out", os.path.join(tmp, "o")]
@@ -492,20 +703,53 @@ class ReportTest(unittest.TestCase):
                 handle.write(json.dumps({"name": "images-netbird-main-x86-64-generic"}))
             argv = []
             for key, value in vars(args_for()).items():
-                argv += [f"--{key.replace('_', '-')}", value]
+                if key not in ("line_list", "line_results", "overlays"):
+                    argv += [f"--{key.replace('_', '-')}", value]
             results = os.path.join(tmp, "results")
             write_results(results, every_target((3, 0, 0), (7, 0, 0)))
+            line_results = os.path.join(tmp, "line-results")
+            for line, data in all_results().items():
+                directory = os.path.join(line_results, f"line-result-netbird-{line}")
+                os.makedirs(directory)
+                with open(os.path.join(directory, "result.json"), "w") as handle:
+                    json.dump(data, handle)
             argv += ["--jobs", paths["jobs"], "--artifacts", paths["artifacts"]]
             argv += ["--results", results, "--out", paths["out"]]
-            self.assertEqual(report.main(argv), 0)
+            argv += ["--line-results", line_results]
+            argv += ["--overlays", json.dumps(overlays_for(LINES))]
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                self.assertEqual(report.main(argv), 0)
+            self.assertEqual(captured.getvalue().strip(), "reference_passed=true")
             with open(paths["out"], encoding="utf-8") as handle:
                 self.assertIn("## Results", handle.read())
+            # The reference line's own file says it failed: not passed.
+            bad = os.path.join(line_results, "line-result-netbird-main", "result.json")
+            with open(bad, "w") as handle:
+                json.dump(
+                    result_for("main", LINES, test="failure", passed=False), handle
+                )
+            captured = io.StringIO()
+            with contextlib.redirect_stdout(captured):
+                report.main(argv)
+            self.assertEqual(captured.getvalue().strip(), "reference_passed=false")
+            # A reference line that is not one of the lines is refused.
+            with self.assertRaises(SystemExit):
+                report.main(argv + ["--reference", "nope"])
 
     def test_cli_requires_the_new_inputs(self) -> None:
-        for missing in ("upstream_base", "test_secrets", "results"):
+        for missing in (
+            "upstream_base",
+            "test_secrets",
+            "results",
+            "lines",
+            "reference",
+            "overlays",
+            "line_results",
+        ):
             argv = []
             for key, value in vars(args_for()).items():
-                if key != missing:
+                if key not in (missing, "line_list"):
                     argv += [f"--{key.replace('_', '-')}", value]
             argv += ["--jobs", "j", "--artifacts", "a", "--out", "o"]
             with self.subTest(missing=missing), self.assertRaises(SystemExit):

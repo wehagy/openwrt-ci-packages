@@ -2,9 +2,10 @@
 # Responsibility: decide how the pull request of custom-image.yml reaches the
 # build, from what scripts/upstream-pr/resolve.sh found. The line of the form
 # is independent of the pull request:
-#   - the base branch of the PR belongs to the chosen line (PR to master, line
-#     main): build the head of the PR from openwrt/packages as it is;
-#   - otherwise (PR to master, line 25.12): overlay the changed package
+#   - the base branch of the PR belongs to the chosen line (the line whose
+#     packages_branch is that branch): build the head of the PR from
+#     openwrt/packages as it is;
+#   - otherwise: overlay the changed package
 #     directories of the PR on the branch of the chosen line, with
 #     scripts/upstream-pr/compose.sh (the job `compose` runs it and needs
 #     base_branch, overlay_dirs, head_sha and pr_number from here).
@@ -24,12 +25,15 @@
 #   PACKAGE        the package of the form
 #   PR_NUMBER, PR_LINE (the `line` output of resolve.sh), HEAD_SHA,
 #   MATRIX_ALL (the testable changed packages as JSON), OVERLAY_DIRS
+#   BASE_LINES_FILE  harness/lines.yml of the base (default ci-base/harness/lines.yml)
 
 set -eu
 
 here=$(dirname "$0")
 # shellcheck source=scripts/upstream-pr/lib.sh
 . "${here}/../upstream-pr/lib.sh"
+# shellcheck source=scripts/lib/lines.sh
+. "${here}/../lib/lines.sh"
 
 : "${LINE:?}" "${PACKAGE:?}" "${PR_NUMBER:?}" "${PR_LINE:?}" "${HEAD_SHA:?}" "${MATRIX_ALL:?}" "${OVERLAY_DIRS:?}"
 
@@ -41,6 +45,7 @@ case "${HEAD_SHA}" in
 	;;
 *) ;;
 esac
+lines_check_file
 base_branch=$(branch_for_line "${LINE}")
 
 # The package must be one of the changed, testable packages of the PR.

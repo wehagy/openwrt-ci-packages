@@ -12,6 +12,10 @@
 #   packages     the images.packages of the package's config.yml (when a
 #                package is given) followed by the form's packages (additions
 #                and -removals, Image Builder syntax).
+#   line         a line of the base (harness/lines.yml); with a package, one of
+#                the lines of its config.yml. The form lists the lines it knows
+#                (a GitHub form cannot read files); this check is what refuses
+#                a line the package does not have.
 #   package      empty: images without a package of ours. Otherwise a package
 #                of this repository (packages/<name>/config.yml).
 #   pr_number    a pull request of openwrt/packages, built or overlaid (see
@@ -29,10 +33,14 @@
 #   LINE, PROFILE, OTHER_PROFILE, PACKAGES, PACKAGE, PR_NUMBER,
 #   FEED_REPOSITORY, FEED_REF
 #   PACKAGES_DIR  directory with <name>/config.yml (default: packages)
+#   BASE_LINES_FILE  harness/lines.yml of the base (default:
+#                 ci-base/harness/lines.yml)
 
 set -eu
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/lib/lines.sh
+. "${script_dir}/../lib/lines.sh"
 
 die() {
 	printf 'error: %s\n' "$*" >&2
@@ -64,10 +72,9 @@ feed_ref=$(trim "${feed_ref}")
 # ---------------------------------------------------------------------------
 # Line and profile.
 # ---------------------------------------------------------------------------
-case "${line}" in
-main | 25.12) ;;
-*) die "line must be main or 25.12" ;;
-esac
+# The line is checked against the package's lines further down (once the
+# package is known); here only that it is a line name at all.
+check_line_name "${line}"
 case "${profile_choice}" in
 other)
 	[ -n "${other_profile}" ] || die "profile is other: fill other_profile with <target>/<subtarget>/<profile>, e.g. ipq40xx/generic/glinet_gl-b1300"
@@ -115,8 +122,17 @@ fi
 # ---------------------------------------------------------------------------
 config_packages=
 limit=
-if [ -n "${package}" ]; then
-	cfg=$("${script_dir}/config.sh" "${package}") || exit 1
+lines_check_file
+if [ -z "${package}" ]; then
+	# No package of ours: any line of the base will do.
+	branch_for_line "${line}" >/dev/null
+else
+	cfg=$("${script_dir}/config.sh" "${package}")
+	package_lines=$(printf '%s\n' "${cfg}" | sed -n -e 's/^lines=//p')
+	case " ${package_lines} " in
+	*" ${line} "*) ;;
+	*) die "line ${line} is not a line of ${package} (its lines: ${package_lines}): choose one of them, or add the line to packages/${package}/config.yml" ;;
+	esac
 	config_packages=$(printf '%s\n' "${cfg}" | sed -n -e 's/^packages=//p')
 	limits=$(printf '%s\n' "${cfg}" | sed -n -e 's/^limits=//p')
 	# limits is "<profile> <bytes>" pairs; the profile has no :too-big suffix.

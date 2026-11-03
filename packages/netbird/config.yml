@@ -11,6 +11,18 @@
 #
 # Keys:
 #   package   name of the package, a directory of openwrt/packages
+#   lines     the release lines the package is built, tested and imaged on, as
+#             named in the base's harness/lines.yml; every workflow runs these
+#             lines in parallel and no line is named anywhere else. Quote each
+#             one ("25.12": an unquoted 25.10 would be read as the number 25.1).
+#             The reference line (the line whose packages_branch is master,
+#             `main`) is required: the update bump is made on it and its result
+#             decides the draft pull request; the other lines build an overlay
+#             of the bump on their own branch of openwrt/packages and may fail
+#             without stopping it. To add a line (e.g. "26.12"): add it to
+#             harness/lines.yml and harness/targets.yml of the base, then to
+#             this list and to the choices of custom-image.yml; to drop one,
+#             delete it from this list.
 #   package_path         update.yml: directory of the package in that tree,
 #                        <section>/<package>
 #   upstream_repository  update.yml: GitHub project whose latest release it
@@ -60,6 +72,7 @@
 #               (ramips/image/mt7621.mk:1563), buffalo_wzr-hp-g450h 32256k
 #               (ath79/image/generic.mk:729).
 package: netbird
+lines: [main, "25.12"]
 package_path: net/netbird
 upstream_repository: netbirdio/netbird
 review_repository: wehagy/w

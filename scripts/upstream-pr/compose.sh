@@ -11,7 +11,7 @@
 # The directories come from the head of a pull request of openwrt/packages by
 # default. update.yml names another source instead (SOURCE_URL, SOURCE_REF,
 # SOURCE_LABEL): the bump commit of the review repository, overlaid on
-# openwrt-25.12 to check the bump as a backport.
+# the packages_branch of another line to check the bump as a backport.
 #
 # Usage: scripts/upstream-pr/compose.sh
 # Environment variables:
@@ -21,6 +21,8 @@
 #                      URL), ref and name to take the directories from, instead
 #                      of refs/pull/PR_NUMBER/head of openwrt/packages;
 #                      HEAD_SHA must be the commit of that ref
+#   OTHER_BRANCH       a packages_branch of a line of the base
+#                      (BASE_LINES_FILE, default ci-base/harness/lines.yml)
 #   TARGET_BRANCH      branch of this repository to push
 #   GITHUB_REPOSITORY  this repository; GH_TOKEN authenticates the push
 #   PUSH_URL           where to push (default https://github.com/$GITHUB_REPOSITORY.git)
@@ -30,6 +32,8 @@ set -eu
 here=$(dirname "$0")
 # shellcheck source=scripts/upstream-pr/lib.sh
 . "${here}/lib.sh"
+# shellcheck source=scripts/lib/lines.sh
+. "${here}/../lib/lines.sh"
 
 : "${OTHER_BRANCH:?}" "${HEAD_SHA:?}" "${OVERLAY_DIRS:?}" "${TARGET_BRANCH:?}"
 : "${GITHUB_REPOSITORY:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
@@ -61,14 +65,9 @@ else
 		;;
 	esac
 fi
-case "${OTHER_BRANCH}" in
-master | openwrt-25.12) ;;
-*)
-	clean "${OTHER_BRANCH}"
-	fail "unexpected branch '${cleaned}'"
-	exit 1
-	;;
-esac
+# The branch must be the packages_branch of a line of the base.
+lines_check_file
+line_for_branch "${OTHER_BRANCH}" >/dev/null
 case "${HEAD_SHA}" in
 *[!0-9a-f]* | '')
 	fail "invalid head sha"

@@ -1,6 +1,6 @@
 """Responsibility: turn the jobs and artifacts of an update.yml run into the body
-of the draft pull request: the results of both lines (build, QEMU tests, images)
-the test suites that ran (counted from the junit files of the QEMU jobs, with
+of the draft pull request: the results of every line of the package (build, QEMU
+tests, images), the test suites that ran (counted from the junit files of the QEMU jobs, with
 what was skipped and what is missing) and the ready link that opens the
 upstream pull request by hand. Nothing here talks to GitHub or writes to any
 repository; the workflow feeds it JSON lines and junit files and publishes the
@@ -9,7 +9,14 @@ text.
 Usage:
     scripts/report.py --package netbird --old 0.81.4 --new 0.82.0 ... \\
         --jobs jobs.jsonl --artifacts artifacts.jsonl --results results --out body.md
-    prints "main_passed=true|false" (a line for $GITHUB_OUTPUT)
+    prints "reference_passed=true|false" (a line for $GITHUB_OUTPUT)
+
+The lines come from --lines (the lines of the package, in the order of its
+config.yml); no line is named here. The result of a line is read from its own
+artifact (line-result-<package>-<line>/result.json, scripts/line-result.sh),
+the job list of the run gives the detail, and a line passes only when both
+agree. The reference line (--reference) is the one that decides the pull
+request; the others are reported.
 
 Environment variables: none.
 """
@@ -24,7 +31,6 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
 from urllib.parse import quote
 
-LINES = ("main", "25.12")
 STAGES = ("build", "test", "image")
 STAGE_TITLES = {"build": "Build (SDK)", "test": "QEMU test", "image": "Image"}
 UPSTREAM_REPOSITORY = "openwrt/packages"
@@ -42,8 +48,12 @@ SKIP_REASONS_SHOWN = 5
 UNSAFE_TEXT = re.compile(r"[@\[\]()<>|`\\]")
 # The target of a QEMU job comes from the name of an artifact.
 TARGET_NAME = r"[A-Za-z0-9._-]+"
-# "<caller job> / <job of the base>", e.g. "image-main / main x86-64-generic".
-JOB_NAME = re.compile(r"^(build|test|image)-(?:main|25-12) / (main|25\.12) (\S+)$")
+# "<matrix job (line)> / <stage> / <job of the base>", e.g.
+# "lines (main) / image / main x86-64-generic": the base names its jobs
+# "<line> <item>", so the line is read from there, whatever the caller calls
+# its matrix job. Only the lines of the package match, so that a setup job of
+# the base ("feed <line>", "targets <line>") is not taken for a worker job.
+JOB_NAME = r"^\S+(?: \([^)]*\))? / (build|test|image) / ({lines}) (\S+)$"
 
 
 @dataclass
@@ -64,11 +74,14 @@ def read_jsonl(path: str) -> list[dict]:
         return [json.loads(row) for row in handle if row.strip()]
 
 
-def parse_jobs(records: list[dict]) -> list[Job]:
-    """Keep the worker jobs; the setup jobs (feed, targets, ...) do not match."""
+def parse_jobs(records: list[dict], lines: list[str]) -> list[Job]:
+    """Keep the worker jobs of the given lines; the setup jobs (feed, targets,
+    ...) do not match."""
     jobs = []
+    choice = "|".join(re.escape(line) for line in lines)
+    pattern = re.compile(JOB_NAME.format(lines=choice))
     for record in records:
-        found = JOB_NAME.match(record.get("name") or "")
+        found = pattern.match(record.get("name") or "")
         if found is None:
             continue
         jobs.append(
@@ -146,11 +159,12 @@ def parse_junit(path: str) -> tuple[Counts, Counts]:
     return generic, package
 
 
-def parse_results(directory: str, package: str) -> list[TargetResult]:
+def parse_results(directory: str, package: str, lines: list[str]) -> list[TargetResult]:
     """Read <directory>/qemu-<package>-<line>-<target>/results.xml (the artifacts
-    of the QEMU jobs, as `gh run download` lays them out)."""
+    of the QEMU jobs, as `gh run download` lays them out) of the given lines."""
     found = []
-    name = re.compile(rf"^qemu-{re.escape(package)}-(main|25\.12)-({TARGET_NAME})$")
+    choice = "|".join(re.escape(line) for line in lines)
+    name = re.compile(rf"^qemu-{re.escape(package)}-({choice})-({TARGET_NAME})$")
     for path in sorted(glob.glob(os.path.join(directory, "qemu-*", "results.xml"))):
         match = name.match(os.path.basename(os.path.dirname(path)))
         if match is None or match.group(2).endswith("-logs"):
@@ -189,13 +203,36 @@ def result_text(job: Job, artifacts: set[str], package: str) -> str:
     return f"**{result}**{detail} [log]({job.url})"
 
 
-def line_passed(jobs: list[Job], line: str) -> bool:
-    """A line passes when every stage has jobs and all of them succeeded."""
+def read_line_results(directory: str, package: str, lines: list[str]) -> dict:
+    """The result file of each line: {line: {build, test, image, feed_sha, passed}}.
+
+    <directory>/line-result-<package>-<line>/result.json, one artifact per leg
+    of the matrix. A line without a readable file is absent from the result.
+    """
+    found = {}
+    for line in lines:
+        path = os.path.join(directory, f"line-result-{package}-{line}", "result.json")
+        if not os.path.isfile(path) or os.path.getsize(path) > RESULTS_MAX_BYTES:
+            continue
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+        if data.get("line") == line and data.get("package") == package:
+            found[line] = data
+    return found
+
+
+def jobs_passed(jobs: list[Job], line: str) -> bool:
+    """The job list says the line passed: every stage has jobs, all succeeded."""
     for stage in STAGES:
         group = [j for j in jobs if j.line == line and j.stage == stage]
         if not group or any(j.conclusion != "success" for j in group):
             return False
     return True
+
+
+def line_passed(jobs: list[Job], line: str, line_results: dict) -> bool:
+    """A line passes when its own result file and the job list both say so."""
+    return line_results.get(line, {}).get("passed") is True and jobs_passed(jobs, line)
 
 
 def stage_summary(
@@ -232,7 +269,7 @@ def upstream_link(
     title = f"{args.package}: update to {args.new}"
     package_run = Counts()
     for result in results:
-        if result.line == "main":
+        if result.line == args.reference:
             package_run.add(result.package)
     runtime = (
         f"; package runtime tests: {package_run.passed} passed, "
@@ -242,8 +279,8 @@ def upstream_link(
     )
     body = (
         f"Maintainer: @{owner}\n"
-        f"Compile tested: {', '.join(built) or 'none'} (OpenWrt main SDK)\n"
-        f"Run tested: QEMU {', '.join(tested) or 'none'} (OpenWrt main, "
+        f"Compile tested: {', '.join(built) or 'none'} (OpenWrt {args.reference} SDK)\n"
+        f"Run tested: QEMU {', '.join(tested) or 'none'} (OpenWrt {args.reference}, "
         f"generic package test: install and files{runtime})\n\n"
         f"Update NetBird from {args.old} to {args.new}.\n\n"
         "Release notes:\n"
@@ -256,20 +293,27 @@ def upstream_link(
     )
 
 
-def overlay_text(args: argparse.Namespace) -> str:
-    """What line 25.12 built: the bumped package laid over openwrt-25.12.
+def overlay_text(
+    args: argparse.Namespace, line: str, overlays: dict, line_results: dict
+) -> str:
+    """What a line other than the reference built: the bumped package laid over
+    the packages_branch of the line.
 
     The line does not build the bump commit (a tree of master) but the branch of
     the line with only the package directory of the bump on it, pushed as a
     commit of this repository, so the check is the one a backport needs.
     """
+    overlay = overlays.get(line)
+    if overlay is None:
+        return "overlay could not be composed: **not built**"
     what = (
-        f"overlay of {args.overlay_dirs} onto {args.overlay_base_branch} "
-        f"@ {args.overlay_base_sha}"
+        f"overlay of {args.overlay_dirs} onto {overlay['base_branch']} "
+        f"@ {overlay['base_sha']}"
     )
-    if not args.feed_sha_25_12:
+    built = line_results.get(line, {}).get("feed_sha", "")
+    if not built:
         return f"{what}: **not built**"
-    return f"{what}: {args.overlay_repository} @ `{args.feed_sha_25_12}`"
+    return f"{what}: {args.overlay_repository} @ `{built}`"
 
 
 def counts_row(counts: Counts) -> str:
@@ -302,7 +346,7 @@ def tests_section(
         "| Line | Suite | Passed | Skipped | Failed | Targets |\n|---|---|---|---|---|---|",
     ]
     notes = []
-    for line in LINES:
+    for line in args.line_list:
         have = [r for r in results if r.line == line]
         expected = sorted(j.item for j in jobs if j.line == line and j.stage == "test")
         missing = [t for t in expected if t not in {r.target for r in have}]
@@ -363,6 +407,8 @@ def build_body(
     jobs: list[Job],
     artifacts: set[str],
     results: list[TargetResult],
+    line_results: dict,
+    overlays: dict,
 ) -> str:
     """The full pull request description."""
     out = []
@@ -380,22 +426,28 @@ def build_body(
     out.append(
         f"| Starting point | `{args.base_branch}` @ `{args.base_sha}` |\n"
         f"| Upstream base | {args.upstream_base} |\n"
-        f"| Bump commit | `{args.update_branch}` @ `{args.head_sha}` |\n"
-        f"| Built (line `main`) | {args.review_repository} @ `{args.feed_sha_main}` |\n"
-        f"| Built (line `25.12`) | {overlay_text(args)} |\n"
+        f"| Bump commit | `{args.update_branch}` @ `{args.head_sha}` |"
     )
+    for line in args.line_list:
+        if line == args.reference:
+            built = line_results.get(line, {}).get("feed_sha", "")
+            what = f"{args.review_repository} @ `{built}`" if built else "**not built**"
+        else:
+            what = overlay_text(args, line, overlays, line_results)
+        out.append(f"| Built (line `{line}`) | {what} |")
+    out.append("")
     out.extend(tests_section(args, jobs, results))
     out.append("## Results\n")
     out.append("| Line | Build (SDK) | QEMU test | Images |\n|---|---|---|---|")
-    for line in LINES:
-        verdict = "passed" if line_passed(jobs, line) else "**FAILED**"
+    for line in args.line_list:
+        verdict = "passed" if line_passed(jobs, line, line_results) else "**FAILED**"
         cells = " | ".join(
             stage_summary(jobs, line, s, artifacts, args.package) for s in STAGES
         )
         out.append(f"| `{line}` {verdict} | {cells} |")
     out.append("")
-    for line in LINES:
-        verdict = "passed" if line_passed(jobs, line) else "FAILED"
+    for line in args.line_list:
+        verdict = "passed" if line_passed(jobs, line, line_results) else "FAILED"
         out.append(f"### Line `{line}`: {verdict}\n")
         out.append("| Stage | Item | Result |\n|---|---|---|")
         for stage in STAGES:
@@ -409,16 +461,25 @@ def build_body(
                     f"{result_text(job, artifacts, args.package)} |"
                 )
         out.append("")
-    if not line_passed(jobs, "25.12"):
+    for line in args.line_list:
+        if line == args.reference or line_passed(jobs, line, line_results):
+            continue
+        missing = (
+            ""
+            if line in line_results
+            else " Its result file is missing: the line did not run to the end. "
+        )
+        branch = overlays.get(line, {}).get("base_branch", "its branch")
         out.append(
-            "Line `25.12` did not pass; the failed jobs are linked above. It builds "
-            f"only `{args.overlay_dirs}` of the bump on `{args.overlay_base_branch}`, "
+            f"Line `{line}` did not pass; the failed jobs are linked above.{missing}"
+            f" It builds only `{args.overlay_dirs}` of the bump on `{branch}`, "
             "so a failure there is the bump as a backport failing (for example a "
             "Go version the branch does not have), not a failure of master's "
-            "feed. The pull request is open because line `main` passed.\n"
+            "feed. The pull request is open because the reference line "
+            f"`{args.reference}` passed.\n"
         )
     out.append("## Upstream pull request\n")
-    link = upstream_link(args, [j for j in jobs if j.line == "main"], results)
+    link = upstream_link(args, [j for j in jobs if j.line == args.reference], results)
     if args.review_is_fork == "true":
         out.append(f"[Open the upstream pull request]({link})\n")
     else:
@@ -448,12 +509,12 @@ def main(argv: list[str] | None = None) -> int:
         "update-branch",
         "base-sha",
         "head-sha",
-        "feed-sha-main",
-        "feed-sha-25-12",
+        "lines",
+        "reference",
+        "overlays",
+        "line-results",
         "overlay-repository",
         "overlay-dirs",
-        "overlay-base-branch",
-        "overlay-base-sha",
         "run-url",
         "jobs",
         "artifacts",
@@ -466,12 +527,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--review-is-fork", choices=("true", "false"), required=True)
     parser.add_argument("--package-tests", choices=("present", "none"), required=True)
     args = parser.parse_args(argv)
-    jobs = parse_jobs(read_jsonl(args.jobs))
+    args.line_list = args.lines.split()
+    if args.reference not in args.line_list:
+        parser.error("--reference is not one of --lines")
+    overlays = json.loads(args.overlays)
+    jobs = parse_jobs(read_jsonl(args.jobs), args.line_list)
     artifacts = {a["name"] for a in read_jsonl(args.artifacts)}
-    results = parse_results(args.results, args.package)
+    results = parse_results(args.results, args.package, args.line_list)
+    line_results = read_line_results(args.line_results, args.package, args.line_list)
     with open(args.out, "w", encoding="utf-8") as handle:
-        handle.write(build_body(args, jobs, artifacts, results))
-    print(f"main_passed={'true' if line_passed(jobs, 'main') else 'false'}")
+        handle.write(build_body(args, jobs, artifacts, results, line_results, overlays))
+    passed = line_passed(jobs, args.reference, line_results)
+    print(f"reference_passed={'true' if passed else 'false'}")
     return 0
 
 

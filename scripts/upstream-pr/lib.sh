@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 # Responsibility: the pure decisions of the upstream pull request workflow
-# (.github/workflows/upstream-pr.yml): input validation, the line of a base
-# branch and the packages a list of changed files belongs to. Sourced by
+# (.github/workflows/upstream-pr.yml): input validation and the packages a list
+# of changed files belongs to (the lines come from scripts/lib/lines.sh). Sourced by
 # resolve.sh and selftest.sh; it does no I/O besides stdin, stdout and stderr.
 #
 # Usage: . scripts/upstream-pr/lib.sh
@@ -46,47 +46,6 @@ check_pr_number() {
 		return 1
 		;;
 	*) ;;
-	esac
-}
-
-# The line (key of harness/lines.yml in the base) a base branch belongs to.
-# Arguments: $1 the base branch of the pull request. Prints the line.
-line_for_base() {
-	case "$1" in
-	master) echo main ;;
-	openwrt-25.12) echo 25.12 ;;
-	*)
-		clean "$1"
-		fail "unsupported base branch '${cleaned}': only master (line main) and openwrt-25.12 (line 25.12) are tested"
-		return 1
-		;;
-	esac
-}
-
-# The other line of the two the base knows. Arguments: $1 a line.
-other_line() {
-	case "$1" in
-	main) echo 25.12 ;;
-	25.12) echo main ;;
-	*)
-		clean "$1"
-		fail "unknown line '${cleaned}'"
-		return 1
-		;;
-	esac
-}
-
-# The branch of openwrt/packages a line is built from (packages_branch of the
-# base's harness/lines.yml). Arguments: $1 a line.
-branch_for_line() {
-	case "$1" in
-	main) echo master ;;
-	25.12) echo openwrt-25.12 ;;
-	*)
-		clean "$1"
-		fail "unknown line '${cleaned}'"
-		return 1
-		;;
 	esac
 }
 
@@ -151,4 +110,43 @@ detect_packages() {
 		}
 		END { for (d in out) print d }
 	' | sort
+}
+
+# A package with packages/<name>/ must list the line of the base branch of the
+# pull request (its config.yml `lines:`); otherwise nothing says it is meant to
+# work there. Arguments: $1 package, $2 its lines (separated by spaces), $3 the
+# line of the pull request.
+check_lists_line() {
+	case " $2 " in
+	*" $3 "*) ;;
+	*)
+		fail "packages/$1/config.yml does not list the line $3, the line of the base branch of this pull request (its lines: $2): add the line to the config.yml, or the package is not tested on this branch"
+		return 1
+		;;
+	esac
+}
+
+# The job matrix of upstream-pr.yml: one leg per (package, line). Every changed
+# package has a leg on the line of the pull request (kind pr: the head of the
+# pull request); a package with packages/<name>/ here also has one per other
+# line of its config.yml (kind overlay: the changed directories laid over the
+# branch of that line), and it builds the images on all of them.
+# Arguments: $1 the package rows as JSON (name, local, lines, ...), $2 the line
+# of the pull request. Prints {"include": [legs]}.
+legs_matrix() {
+	printf '%s' "$1" | jq -c --arg pr "$2" '
+		[.[] | . as $r
+		| ($r + {line: $pr, kind: "pr", with_images: $r.local}),
+		  (if $r.local then ($r.lines | split(" ")[] | select(. != $pr)
+		  | $r + {line: ., kind: "overlay", with_images: true}) else empty end)]
+		| {include: .}'
+}
+
+# The lines other than the pull request line that the local packages list,
+# once each, separated by spaces. Arguments: $1 the rows as JSON, $2 the line
+# of the pull request.
+overlay_lines() {
+	printf '%s' "$1" | jq -r --arg pr "$2" '
+		[.[] | select(.local) | .lines | split(" ")[] | select(. != $pr)]
+		| unique | join(" ")'
 }

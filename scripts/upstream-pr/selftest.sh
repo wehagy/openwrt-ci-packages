@@ -11,6 +11,11 @@ set -u
 here=$(dirname "$0")
 # shellcheck source=scripts/upstream-pr/lib.sh
 . "${here}/lib.sh"
+# shellcheck source=scripts/lib/lines.sh
+. "${here}/../lib/lines.sh"
+# The lines of the base: a stub with a FAKE third line (main, 25.12, 26.12).
+BASE_LINES_FILE=${here}/../stubs/lines.yml
+export BASE_LINES_FILE
 
 work=$(mktemp -d)
 trap 'rm -rf "${work}"' EXIT
@@ -68,24 +73,44 @@ for n in "" abc 12a 1.5 -5 +5 0 007 12345678 "1 2" "${nl}" "1;id"; do
 done
 
 # --- base branch -> line -----------------------------------------------------
-expect_prints "master is line main" main line_for_base master
-expect_prints "openwrt-25.12 is line 25.12" 25.12 line_for_base openwrt-25.12
+expect_prints "master is line main" main line_for_branch master
+expect_prints "openwrt-25.12 is line 25.12" 25.12 line_for_branch openwrt-25.12
+expect_prints "openwrt-26.12 is line 26.12 (the fake third line)" 26.12 line_for_branch openwrt-26.12
 for b in openwrt-24.10 openwrt-23.05 main "" master2 "master
 ::error::forged"; do
 	label=$(printf '%s' "${b}" | tr '\n' '~')
-	expect_refused "base '${label}' refused" "::error::unsupported base branch" line_for_base "${b}"
+	expect_refused "base '${label}' refused" "unsupported base branch" line_for_branch "${b}"
 done
-expect_prints "other of main" 25.12 other_line main
-expect_prints "other of 25.12" main other_line 25.12
 expect_prints "branch of main" master branch_for_line main
 expect_prints "branch of 25.12" openwrt-25.12 branch_for_line 25.12
+expect_prints "branch of 26.12" openwrt-26.12 branch_for_line 26.12
+expect_refused "branch of an unknown line" "the base has no line '24.10'" branch_for_line 24.10
+expect_prints "the reference line is the one on master" main reference_line
 # A forged workflow command in a branch name does not start a line of its own.
-if line_for_base "x
+if line_for_branch "x
 ::error::forged" 2>&1 | grep -q '^::error::forged'; then
 	report "forged line is not echoed" "a line starts with ::error::forged"
 else
 	report "forged line is not echoed" ok
 fi
+
+# --- the legs of the matrix: one per (package, line) -------------------------
+# netbird is local with three lines; curl is a package of the PR with no
+# packages/<name>/ here. rows: {package, local, lines}.
+rows='[{"package":"netbird","local":true,"lines":"main 25.12 26.12"},{"package":"curl","local":false,"lines":""}]'
+
+leg_list() {
+	legs_matrix "${rows}" "$1" | jq -r '.include[] | "\(.package):\(.line):\(.kind):\(.with_images)"' | tr '\n' ' '
+}
+expect_prints "legs: PR on 26.12 overlays the other two lines of netbird" \
+	"netbird:26.12:pr:true netbird:main:overlay:true netbird:25.12:overlay:true curl:26.12:pr:false " leg_list 26.12
+expect_prints "legs: PR on main" "netbird:main:pr:true netbird:25.12:overlay:true netbird:26.12:overlay:true curl:main:pr:false " leg_list main
+expect_prints "legs: a package outside the PR line is not a leg of that line" "netbird:25.12:pr:true netbird:main:overlay:true netbird:26.12:overlay:true curl:25.12:pr:false " leg_list 25.12
+expect_prints "overlay lines of a PR on main" "25.12 26.12" overlay_lines "${rows}" main
+expect_prints "overlay lines of a PR on 26.12" "25.12 main" overlay_lines "${rows}" 26.12
+expect_prints "no overlay line without a local package" "" overlay_lines '[{"package":"curl","local":false,"lines":""}]' main
+expect_prints "a package lists the line of the PR" "" check_lists_line netbird "main 26.12" 26.12
+expect_refused "a package that dropped the line of the PR" "does not list the line 25.12" check_lists_line netbird "main 26.12" 25.12
 
 # --- package names -----------------------------------------------------------
 for p in netbird libsoc python-yaml libstdcpp6 a.b+c_d-e; do
@@ -187,7 +212,7 @@ if [ -s "${work}/stub.log" ]; then
 else
 	report "resolve: no request for a bad number" ok
 fi
-expect_refused "resolve: base openwrt-24.10 refused" "::error::unsupported base branch 'openwrt-24.10'" run_resolve 30947
+expect_refused "resolve: base openwrt-24.10 refused" "unsupported base branch 'openwrt-24.10'" run_resolve 30947
 if [ -s "${work}/output.txt" ]; then
 	wrote=$(cat "${work}/output.txt")
 	report "resolve: no output written on refusal" "wrote: ${wrote}"

@@ -14,13 +14,29 @@
 # service test of the base skips). `limits` is "<profile> <bytes>" pairs separated by
 # spaces.
 #
+# `lines` (space separated) and `lines_json` (a JSON array, the matrix of the
+# workflows) are the release lines of the package, as listed in its config.yml
+# (`lines:`, in that order); `reference` is the reference line (the line of the
+# base whose packages_branch is master) and `others` / `others_json` the lines
+# without it. Every line must exist in the base's harness/lines.yml and the
+# reference line must be listed (scripts/lib/lines.sh). SELECT_LINES narrows
+# the output to some of the lines of the package (a manual run of ci.yml).
+#
 # Usage:
 #   scripts/images/config.sh <package> >> "$GITHUB_OUTPUT"
 #
 # Environment variables:
-#   PACKAGES_DIR  directory with <name>/config.yml (default: packages)
+#   PACKAGES_DIR   directory with <name>/config.yml (default: packages)
+#   BASE_LINES_FILE  harness/lines.yml of the base (default:
+#                  ci-base/harness/lines.yml)
+#   SELECT_LINES   optional, lines of the package to keep, separated by spaces;
+#                  a line the package does not list is an error
 
 set -eu
+
+script_dir=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source=scripts/lib/lines.sh
+. "${script_dir}/../lib/lines.sh"
 
 die() {
 	printf 'error: %s\n' "$*" >&2
@@ -49,6 +65,58 @@ value() {
 
 name=$(value .package)
 [ "${name}" = "${package}" ] || die "${config}: package is not ${package}"
+lines_check_file
+# The lines: a list of strings (an unquoted 25.10 is a number in YAML and would
+# lose its zero), every one a line of the base, the reference line among them.
+lines_tag=$(value '.lines | tag')
+[ "${lines_tag}" = '!!seq' ] ||
+	die "${config}: lines is required and must be a list, e.g. lines: [<reference line>, <other line>]"
+lines_bad=$(value '[.lines[] | select(tag != "!!str")] | length')
+[ "${lines_bad}" = 0 ] ||
+	die "${config}: every line must be a quoted string, e.g. \"<line>\" (an unquoted number is read as a decimal and loses a trailing zero)"
+package_lines=$(value '.lines | join(" ")')
+check_package_lines "${package_lines}" "${config}: lines"
+reference=$(reference_line)
+selected=
+if [ -n "${SELECT_LINES:-}" ]; then
+	for want in ${SELECT_LINES}; do
+		case " ${package_lines} " in
+		*" ${want} "*) ;;
+		*) die "line ${want} is not a line of ${package} (its lines: ${package_lines})" ;;
+		esac
+		case " ${selected} " in
+		*" ${want} "*) ;;
+		*) selected="${selected} ${want}" ;;
+		esac
+	done
+	# Keep the order of the config.
+	kept=
+	for line in ${package_lines}; do
+		case " ${selected} " in
+		*" ${line} "*) kept="${kept} ${line}" ;;
+		*) ;;
+		esac
+	done
+	package_lines=${kept# }
+	[ -n "${package_lines}" ] || die "SELECT_LINES selects no line of ${package}"
+fi
+others=
+for line in ${package_lines}; do
+	[ "${line}" = "${reference}" ] || others="${others} ${line}"
+done
+others=${others# }
+
+# A JSON array of strings out of words that line_name_ok accepted.
+#
+# Arguments:
+#   $1  words, separated by spaces
+json_array() {
+	ja_out=
+	for ja_word in $1; do
+		ja_out="${ja_out:+${ja_out},}\"${ja_word}\""
+	done
+	printf '[%s]' "${ja_out}"
+}
 profiles=$(value '.images.profiles // [] | join(" ")')
 packages=$(value '.images.packages')
 targets=$(value .targets)
@@ -96,7 +164,15 @@ if [ -n "${apk_timeout}" ]; then
 		die "${config}: apk_timeout must be whole seconds from 30 to 600, e.g. 120"
 fi
 
+lines_json=$(json_array "${package_lines}")
+others_json=$(json_array "${others}")
+
 printf 'package=%s\n' "${name}"
+printf 'lines=%s\n' "${package_lines}"
+printf 'lines_json=%s\n' "${lines_json}"
+printf 'reference=%s\n' "${reference}"
+printf 'others=%s\n' "${others}"
+printf 'others_json=%s\n' "${others_json}"
 printf 'profiles=%s\n' "${profiles}"
 printf 'packages=%s\n' "${packages}"
 printf 'targets=%s\n' "${targets}"

@@ -1,0 +1,13 @@
+# Responsibility: a stand-in for harness/lines.yml of the base (wehagy/openwrt-ci)
+# in the offline self-tests (BASE_LINES_FILE). It has the two lines of the base
+# and a FAKE third line, "26.12", so that the tests prove that a new line works
+# by editing the list of a package and nothing else, and that dropping "25.12"
+# does too. Only the keys the scripts of this repository read (packages_branch)
+# are here.
+lines:
+  "25.12":
+    packages_branch: openwrt-25.12
+  "26.12":
+    packages_branch: openwrt-26.12
+  main:
+    packages_branch: master

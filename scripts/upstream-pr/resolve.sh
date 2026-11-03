@@ -7,6 +7,12 @@
 # Nothing is written to GITHUB_OUTPUT before every check passed. Read-only
 # towards openwrt/packages (GET requests and a git fetch).
 #
+# The line of the PR is the line of the base whose packages_branch is the PR's
+# base branch (scripts/lib/lines.sh). A package with packages/<name>/ here runs
+# on the PR line (the head of the PR) and, overlaid on its own branch, on every
+# other line its config.yml lists; it must list the PR line. Outputs
+# matrix_legs: one entry per (package, line).
+#
 # Usage: scripts/upstream-pr/resolve.sh   (run from the root of the repository)
 # Environment variables:
 #   PR_NUMBER          the dispatch input, validated here
@@ -16,11 +22,14 @@
 #   MAX_PACKAGES       most changed packages accepted (default 5)
 #   UPSTREAM_REPOSITORY  the feed repository (default openwrt/packages)
 #   API_URL            GitHub API root (default https://api.github.com)
+#   BASE_LINES_FILE    harness/lines.yml of the base (default ci-base/harness/lines.yml)
 set -eu
 
 here=$(dirname "$0")
 # shellcheck source=scripts/upstream-pr/lib.sh
 . "${here}/lib.sh"
+# shellcheck source=scripts/lib/lines.sh
+. "${here}/../lib/lines.sh"
 
 : "${PR_NUMBER:?}" "${GITHUB_OUTPUT:?}" "${GITHUB_STEP_SUMMARY:?}"
 max_packages=${MAX_PACKAGES:-5}
@@ -61,9 +70,8 @@ head_sha=$(jq -r '.head.sha' "${work}/pr.json")
 state=$(jq -r 'if .merged then "merged" else .state end' "${work}/pr.json")
 changed_files=$(jq -r '.changed_files' "${work}/pr.json")
 title=$(jq -r '.title' "${work}/pr.json" | tr -cd '[:print:]' | cut -c1-120)
-line=$(line_for_base "${base_ref}")
-other=$(other_line "${line}")
-other_branch=$(branch_for_line "${other}")
+lines_check_file
+line=$(line_for_branch "${base_ref}")
 case "${head_sha}" in
 *[!0-9a-f]* | '') fail "the API returned no valid head sha" ;;
 *) ;;
@@ -141,6 +149,7 @@ while read -r dir; do
 	apk_timeout=
 	services_disabled=
 	image_packages=
+	pkg_lines=
 	if [ "${is_local}" = true ]; then
 		cfg=$("${here}/../images/config.sh" "${name}") || exit 1
 		profiles=$(printf '%s\n' "${cfg}" | sed -n -e 's/^profiles=//p')
@@ -149,9 +158,11 @@ while read -r dir; do
 		apk_timeout=$(printf '%s\n' "${cfg}" | sed -n -e 's/^apk_timeout=//p')
 		services_disabled=$(printf '%s\n' "${cfg}" | sed -n -e 's/^services_disabled=//p')
 		image_packages=$(printf '%s\n' "${cfg}" | sed -n -e 's/^packages=//p')
+		pkg_lines=$(printf '%s\n' "${cfg}" | sed -n -e 's/^lines=//p')
+		check_lists_line "${name}" "${pkg_lines}" "${line}"
 	fi
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" \
-		"${profiles}" "${targets}" "${memory}" "${image_packages}" "${apk_timeout}" "${services_disabled}" >>"${work}/rows.tsv"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" \
+		"${profiles}" "${targets}" "${memory}" "${image_packages}" "${apk_timeout}" "${services_disabled}" "${pkg_lines}" >>"${work}/rows.tsv"
 done <"${work}/pkgdirs.txt"
 if [ ! -s "${work}/rows.tsv" ]; then
 	while read -r line_skipped; do
@@ -166,15 +177,19 @@ if [ "${dups}" -ne 0 ]; then
 fi
 
 # 6. Matrices: every package gets tests_path (a missing directory means only
-# the generic test); the full pipeline (images, overlay) is for the local ones.
+# the generic test); the full pipeline (images, overlay on the other lines) is
+# for the local ones. matrix_legs has one leg per (package, line): the PR line
+# for every package (kind pr: the head of the PR) and, for a local package,
+# every other line of its config.yml (kind overlay).
 rows_json=$(jq -R -s -c '
 	split("\n") | map(select(length > 0) | split("\t")
 	| {package: .[0], dir: .[1], local: (.[2] == "true"),
 	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end),
-	   profiles: .[3], targets: .[4], memory: .[5], image_packages: .[6], apk_timeout: .[7], services_disabled: .[8]})' "${work}/rows.tsv")
+	   profiles: .[3], targets: .[4], memory: .[5], image_packages: .[6], apk_timeout: .[7], services_disabled: .[8], lines: .[9]})' "${work}/rows.tsv")
 matrix_all=$(printf '%s' "${rows_json}" | jq -c '{include: .}')
-matrix_full=$(printf '%s' "${rows_json}" | jq -c '{include: map(select(.local))}')
-has_full=$(printf '%s' "${rows_json}" | jq -r 'any(.[]; .local)')
+matrix_legs=$(legs_matrix "${rows_json}" "${line}")
+overlay_lines=$(overlay_lines "${rows_json}" "${line}")
+if [ -n "${overlay_lines}" ]; then has_overlay=true; else has_overlay=false; fi
 overlay_dirs=$(tr '\n' ' ' <"${work}/pkgdirs.txt" | sed 's/ $//')
 skipped_count=$(wc -l <"${work}/skipped.txt")
 
@@ -182,12 +197,11 @@ skipped_count=$(wc -l <"${work}/skipped.txt")
 {
 	echo "pr_number=${PR_NUMBER}"
 	echo "line=${line}"
-	echo "other_line=${other}"
-	echo "other_branch=${other_branch}"
+	echo "overlay_lines=${overlay_lines}"
+	echo "has_overlay=${has_overlay}"
 	echo "head_sha=${head_sha}"
 	echo "matrix_all=${matrix_all}"
-	echo "matrix_full=${matrix_full}"
-	echo "has_full=${has_full}"
+	echo "matrix_legs=${matrix_legs}"
 	echo "overlay_dirs=${overlay_dirs}"
 	echo "skipped=${skipped_count}"
 } >>"${GITHUB_OUTPUT}"
@@ -197,14 +211,14 @@ skipped_count=$(wc -l <"${work}/skipped.txt")
 	echo "### upstream pull request ${upstream}#${PR_NUMBER}"
 	echo
 	echo "- title: ${title}"
-	echo "- state: ${state}, base branch: ${base_ref} -> line ${line}, other line: ${other} (branch ${other_branch})"
+	echo "- state: ${state}, base branch: ${base_ref} -> line ${line}, overlay lines: ${overlay_lines:-none}"
 	echo "- head: ${head_sha} (refs/pull/${PR_NUMBER}/head), ${changed_files} changed files"
 	echo "- built as the head commit, without merging the base branch (refs/pull/${PR_NUMBER}/merge is not used)"
 	echo "- no secret reaches the build or the tests of an upstream pull request: tests that need one skip"
 	echo "- changed packages: ${count} (directory, name)"
 	while IFS="$(printf '\t')" read -r name dir is_local _; do
 		if [ "${is_local}" = true ]; then
-			pipeline="full pipeline on ${line} and, overlaid on ${other_branch}, on ${other}"
+			pipeline="full pipeline on ${line} and, overlaid on the branch of each line, on the other lines of its config.yml"
 		else
 			pipeline="build + generic test on ${line} only"
 		fi

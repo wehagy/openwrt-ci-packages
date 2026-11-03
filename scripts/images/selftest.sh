@@ -87,6 +87,9 @@ expect_refused() {
 # config.sh
 # ---------------------------------------------------------------------------
 cfg=${here}/config.sh
+# The lines of the base: a stub with a FAKE third line, so that the tests do not
+# depend on the real base (scripts/stubs/lines.yml: main, 25.12, 26.12).
+export BASE_LINES_FILE="${root}/scripts/stubs/lines.yml"
 # The real configuration only has to be readable; the values are checked on a
 # fixture, so that a throwaway config (a proof branch) does not break this test.
 export PACKAGES_DIR="${root}/packages"
@@ -95,6 +98,7 @@ fx=${work}/fx
 mkdir -p "${fx}/netbird"
 cat >"${fx}/netbird/config.yml" <<'EOF'
 package: netbird
+lines: [main, "25.12"]
 memory: 256M
 apk_timeout: 120
 services_disabled: [socat, ssh-agent]
@@ -122,14 +126,14 @@ expect_refused "config: no argument" "usage" "${cfg}"
 
 export PACKAGES_DIR="${work}/pk"
 mkdir -p "${PACKAGES_DIR}/a" "${PACKAGES_DIR}/b" "${PACKAGES_DIR}/c" "${PACKAGES_DIR}/d" "${PACKAGES_DIR}/e" "${PACKAGES_DIR}/f"
-printf 'package: a\n' >"${PACKAGES_DIR}/a/config.yml"
-printf 'package: other\n' >"${PACKAGES_DIR}/b/config.yml"
-printf 'package: c\nimages:\n  profiles:\n    - "x86/64/generic;id"\n' >"${PACKAGES_DIR}/c/config.yml"
-printf 'package: d\nmemory: 2G\n' >"${PACKAGES_DIR}/d/config.yml"
-printf 'package: f\napk_timeout: 2m\n' >"${PACKAGES_DIR}/f/config.yml"
+printf 'package: a\nlines: [main]\n' >"${PACKAGES_DIR}/a/config.yml"
+printf 'package: other\nlines: [main]\n' >"${PACKAGES_DIR}/b/config.yml"
+printf 'package: c\nlines: [main]\nimages:\n  profiles:\n    - "x86/64/generic;id"\n' >"${PACKAGES_DIR}/c/config.yml"
+printf 'package: d\nlines: [main]\nmemory: 2G\n' >"${PACKAGES_DIR}/d/config.yml"
+printf 'package: f\nlines: [main]\napk_timeout: 2m\n' >"${PACKAGES_DIR}/f/config.yml"
 mkdir -p "${PACKAGES_DIR}/g"
-printf 'package: g\nservices_disabled: ["a/b"]\n' >"${PACKAGES_DIR}/g/config.yml"
-printf 'package: e\ntargets: "x86-64\\n::error::x"\n' >"${PACKAGES_DIR}/e/config.yml"
+printf 'package: g\nlines: [main]\nservices_disabled: ["a/b"]\n' >"${PACKAGES_DIR}/g/config.yml"
+printf 'package: e\nlines: [main]\ntargets: "x86-64\\n::error::x"\n' >"${PACKAGES_DIR}/e/config.yml"
 expect_line "config: a package with no images or overrides: empty profiles" "profiles=" "${cfg}" a
 expect_line "config: a package with no overrides: empty memory" "memory=" "${cfg}" a
 expect_refused "config: package key differs from the directory" "package is not b" "${cfg}" b
@@ -142,7 +146,7 @@ for pair in h:29 i:600 j:601 k:029; do
 	n=${pair%%:*}
 	v=${pair#*:}
 	mkdir -p "${PACKAGES_DIR}/${n}"
-	printf 'package: %s\napk_timeout: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
+	printf 'package: %s\nlines: [main]\napk_timeout: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
 done
 expect_refused "config: apk_timeout below 30 s" "apk_timeout must be whole seconds from 30 to 600" "${cfg}" h
 expect_line "config: apk_timeout 600 is the ceiling" "apk_timeout=600" "${cfg}" i
@@ -152,7 +156,7 @@ for pair in m:32M n:64M o:1024M p:1025M q:2048M r:0256M s:256 t:M u:99999M; do
 	n=${pair%%:*}
 	v=${pair#*:}
 	mkdir -p "${PACKAGES_DIR}/${n}"
-	printf 'package: %s\nmemory: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
+	printf 'package: %s\nlines: [main]\nmemory: %s\n' "${n}" "${v}" >"${PACKAGES_DIR}/${n}/config.yml"
 done
 expect_refused "config: memory below 64M" "memory must be NNNM from 64M to 1024M" "${cfg}" m
 expect_line "config: memory 64M is the floor" "memory=64M" "${cfg}" n
@@ -165,6 +169,61 @@ expect_refused "config: memory M alone" "memory must be NNNM from 64M to 1024M" 
 expect_refused "config: memory with five digits" "memory must be NNNM from 64M to 1024M" "${cfg}" u
 expect_refused "config: invalid memory" "memory must be NNNM" "${cfg}" d
 expect_refused "config: newline in a value cannot forge a command" "targets has a character" "${cfg}" e
+
+# --- the lines of a package: all from its config.yml and the base's lines.yml ---
+# Arguments: $1 package (a directory under ${PACKAGES_DIR}), $2 the text of its
+# `lines:` key (a line of YAML), or nothing for a config without the key.
+mkpkg() {
+	mkdir -p "${PACKAGES_DIR}/$1"
+	if [ "$#" -ge 2 ]; then
+		printf 'package: %s\n%s\n' "$1" "$2" >"${PACKAGES_DIR}/$1/config.yml"
+	else
+		printf 'package: %s\n' "$1" >"${PACKAGES_DIR}/$1/config.yml"
+	fi
+}
+mkpkg two 'lines: [main, "25.12"]'
+expect_line "lines: two lines, in the order of the config" "lines=main 25.12" "${cfg}" two
+expect_line "lines: the matrix of two lines" 'lines_json=["main","25.12"]' "${cfg}" two
+expect_line "lines: the reference line is the one on master" "reference=main" "${cfg}" two
+expect_line "lines: the others" "others=25.12" "${cfg}" two
+expect_line "lines: the others as JSON" 'others_json=["25.12"]' "${cfg}" two
+# A new line is added by editing this one list (and the base): three lines.
+mkpkg three 'lines: [main, "25.12", "26.12"]'
+expect_line "lines: three lines in the matrix" 'lines_json=["main","25.12","26.12"]' "${cfg}" three
+expect_line "lines: three lines, two of them not the reference" 'others_json=["25.12","26.12"]' "${cfg}" three
+# The old line goes by deleting it from the list.
+mkpkg dropped 'lines: [main, "26.12"]'
+expect_line "lines: dropping 25.12 leaves the others" "lines=main 26.12" "${cfg}" dropped
+expect_line "lines: dropping 25.12, the others as JSON" 'others_json=["26.12"]' "${cfg}" dropped
+mkpkg order 'lines: ["26.12", main, "25.12"]'
+expect_line "lines: the reference need not be first" "reference=main" "${cfg}" order
+expect_line "lines: the others keep the order of the config" "others=26.12 25.12" "${cfg}" order
+mkpkg only 'lines: [main]'
+expect_line "lines: a package with only the reference line" 'others_json=[]' "${cfg}" only
+expect_line "lines: SELECT_LINES narrows the matrix" 'lines_json=["26.12"]' env SELECT_LINES=26.12 "${cfg}" three
+expect_line "lines: SELECT_LINES keeps the order of the config" "lines=main 26.12" env "SELECT_LINES=26.12 main" "${cfg}" three
+expect_refused "lines: SELECT_LINES with a line the package does not have" "is not a line of three" env SELECT_LINES=24.10 "${cfg}" three
+mkpkg nolines
+expect_refused "lines: missing key" "lines is required" "${cfg}" nolines
+mkpkg scalar 'lines: main'
+expect_refused "lines: not a list" "must be a list" "${cfg}" scalar
+mkpkg empty 'lines: []'
+expect_refused "lines: empty list" "lines is empty" "${cfg}" empty
+mkpkg unknown 'lines: [main, "27.01"]'
+expect_refused "lines: a line the base does not have" "names the line '27.01', which the base does not have" "${cfg}" unknown
+mkpkg twice 'lines: [main, "25.12", "25.12"]'
+expect_refused "lines: a line listed twice" "lists the line '25.12' twice" "${cfg}" twice
+mkpkg noref 'lines: ["25.12", "26.12"]'
+expect_refused "lines: the reference line is required" "does not list the reference line main" "${cfg}" noref
+mkpkg number 'lines: [main, 26.10]'
+expect_refused "lines: an unquoted number is refused" "must be a quoted string" "${cfg}" number
+mkpkg forged 'lines: [main, "25.12;id"]'
+expect_refused "lines: a forged name is refused" "invalid line name" "${cfg}" forged
+expect_refused "lines: no base lines.yml" "lines.yml is not at" env BASE_LINES_FILE="${work}/missing.yml" "${cfg}" two
+printf 'lines:\n  main:\n    packages_branch: other\n' >"${work}/noref-base.yml"
+expect_refused "lines: a base with no line on master" "no line of the base has packages_branch master" env BASE_LINES_FILE="${work}/noref-base.yml" "${cfg}" two
+printf 'lines:\n  main:\n    packages_branch: master\n  next:\n    packages_branch: master\n' >"${work}/dup-base.yml"
+expect_refused "lines: a base with two lines on master" "reference line is ambiguous" env BASE_LINES_FILE="${work}/dup-base.yml" "${cfg}" two
 
 # ---------------------------------------------------------------------------
 # custom.sh (the form)
@@ -197,7 +256,17 @@ expect_refused "form: other_profile with a configured profile" "only used when p
 expect_refused "form: other_profile with two words" "other_profile must be" form PROFILE=other "OTHER_PROFILE=a/b/c d/e/f"
 expect_refused "form: other_profile of two parts" "other_profile must be" form PROFILE=other OTHER_PROFILE=a/b
 expect_refused "form: other_profile with a command" "other_profile must be" form PROFILE=other 'OTHER_PROFILE=a/b/c;id'
-expect_refused "form: unknown line" "line must be" form LINE=24.10
+expect_refused "form: a line the base does not have" "the base has no line '24.10'" form LINE=24.10
+expect_refused "form: a forged line" "invalid line name" form 'LINE=main;id'
+expect_refused "form: a line the package does not have" "line 26.12 is not a line of netbird" form PACKAGE=netbird LINE=26.12
+expect_line "form: a line of the package" "line=25.12" form PACKAGE=netbird LINE=25.12
+# 26.12 is a line of the base and, with it in the list, of the package: nothing
+# else changes (and 25.12 is refused when the package drops it).
+mkdir -p "${work}/pk3/netbird" "${work}/pk4/netbird"
+sed 's/^lines: .*/lines: [main, "25.12", "26.12"]/' "${fx}/netbird/config.yml" >"${work}/pk3/netbird/config.yml"
+sed 's/^lines: .*/lines: [main, "26.12"]/' "${fx}/netbird/config.yml" >"${work}/pk4/netbird/config.yml"
+expect_line "form: a third line in the config is accepted" "line=26.12" form "PACKAGES_DIR=${work}/pk3" PACKAGE=netbird LINE=26.12
+expect_refused "form: a dropped line is refused" "line 25.12 is not a line of netbird (its lines: main 26.12)" form "PACKAGES_DIR=${work}/pk4" PACKAGE=netbird LINE=25.12
 expect_refused "form: unknown package" "is not a package of this repository" form PACKAGE=nope
 expect_refused "form: invalid packages text" "packages: allowed are" form 'PACKAGES=owut;id'
 expect_line "form: pull request" "source_mode=pr" form PACKAGE=netbird PR_NUMBER=31059
@@ -236,7 +305,9 @@ expect_refused "pr-source: the package is not changed by the PR" "does not chang
 expect_refused "pr-source: the message lists what the PR changes" "netbird curl" decide PACKAGE=nginx
 expect_refused "pr-source: invalid head sha" "invalid head sha" decide HEAD_SHA=zz
 expect_refused "pr-source: invalid pr number" "pr_number" decide PR_NUMBER=abc
-expect_refused "pr-source: unknown line" "unknown line" decide LINE=24.10
+expect_refused "pr-source: unknown line" "the base has no line '24.10'" decide LINE=24.10
+expect_line "pr-source: a third line overlays on its own branch" "base_branch=openwrt-26.12" decide LINE=26.12
+expect_line "pr-source: PR to a third line's branch on that line builds the head" "overlay=false" decide LINE=26.12 PR_LINE=26.12
 
 # ---------------------------------------------------------------------------
 # summary.sh
@@ -333,7 +404,7 @@ if [ "${last}" = other ]; then
 else
 	report "workflow: other is the last choice" "last is ${last}"
 fi
-for f in ci upstream-pr custom-image; do
+for f in line custom-image; do
 	file=${root}/.github/workflows/${f}.yml
 	uses=$(grep -o 'wehagy/openwrt-ci/\.github/workflows/[a-z]*\.yml@[^ ]*' "${file}" | sed 's/.*@//' | sort -u | tr '\n' ' ')
 	cirefs=$(grep -o '^ *ci_ref: .*' "${file}" | sed 's/.*ci_ref: //' | sort -u | tr '\n' ' ')
@@ -382,6 +453,74 @@ image_case "does not run after a cancelled build" skip success netbird cancelled
 image_case "runs for images only (no package, build skipped)" run success "" skipped
 image_case "does not run when config failed" skip failure "" skipped
 image_case "does not run when config failed (build success)" skip failure netbird success
+
+# ---------------------------------------------------------------------------
+# No line is named outside the data: the lines of a package are its config.yml,
+# the branch of a line and the reference line are the base's lines.yml. The one
+# exception is the list of choices of the custom-image form (a GitHub form cannot
+# read files).
+# ---------------------------------------------------------------------------
+# Print the lines of the files that name a line (25.12, 26.x, openwrt-2x, or a
+# literal main / master line), except the form choices.
+#
+# Arguments: the files.
+named_lines() {
+	grep -nE '25[.-]12|2[6-9][.-][0-9]+|openwrt-2[0-9]|(^|[^A-Za-z0-9_./-])line: *"?(main|[0-9])|\"main\"|== *.main.' "$@" | grep -v 'options: \[main, "25.12"\]' | grep -v 'ubuntu-26.04' || :
+}
+workflow_files=$(find "${root}/.github/workflows" -name '*.yml' | sort)
+# shellcheck disable=SC2086
+got=$(named_lines ${workflow_files})
+if [ -z "${got}" ]; then
+	report "no line is named in the workflows (but the form choices)" ok
+else
+	report "no line is named in the workflows (but the form choices)" "${got}"
+fi
+script_files=$(find "${root}/scripts" -type f \( -name '*.sh' -o -name '*.py' \) ! -name '*selftest*' ! -path '*/stubs/*' | sort)
+# shellcheck disable=SC2086
+got=$(named_lines ${script_files})
+if [ -z "${got}" ]; then
+	report "no line is named in the scripts or in report.py" ok
+else
+	report "no line is named in the scripts or in report.py" "${got}"
+fi
+# The form choices are lines of the base, and the only place that lists them.
+choices=$(yq -r '.on.workflow_dispatch.inputs.line.options[]' "${root}/.github/workflows/custom-image.yml" | tr '\n' ' ')
+for choice in ${choices}; do
+	if yq -e ".lines.\"${choice}\"" "${BASE_LINES_FILE}" >/dev/null; then
+		report "custom-image form choice ${choice} is a line of the base" ok
+	else
+		report "custom-image form choice ${choice} is a line of the base" "not in ${BASE_LINES_FILE}"
+	fi
+done
+# The callers run the lines through line.yml with a matrix over the lines of
+# the package; none builds, tests or images a line by itself.
+for f in ci update upstream-pr; do
+	file=${root}/.github/workflows/${f}.yml
+	uses=$(yq -r '.jobs.lines.uses' "${file}")
+	if [ "${uses}" = ./.github/workflows/line.yml ]; then
+		report "workflow: ${f}.yml runs its lines through line.yml" ok
+	else
+		report "workflow: ${f}.yml runs its lines through line.yml" "uses: ${uses}"
+	fi
+	direct=$(grep -c 'wehagy/openwrt-ci/\.github/workflows/' "${file}" || :)
+	if [ "${direct}" -eq 0 ]; then
+		report "workflow: ${f}.yml calls the base only through line.yml" ok
+	else
+		report "workflow: ${f}.yml calls the base only through line.yml" "${direct} direct call(s)"
+	fi
+done
+got=$(yq -r '.jobs.lines.strategy.matrix.line' "${root}/.github/workflows/ci.yml")
+if [ "${got}" = "\${{ fromJSON(needs.config.outputs.lines_json) }}" ]; then
+	report "workflow: ci.yml's matrix is the lines of the package" ok
+else
+	report "workflow: ci.yml's matrix is the lines of the package" "${got}"
+fi
+got=$(yq -r '.on.workflow_dispatch.inputs.lines.type' "${root}/.github/workflows/ci.yml")
+if [ "${got}" = string ]; then
+	report "workflow: ci.yml's lines input is free text, validated by config.sh" ok
+else
+	report "workflow: ci.yml's lines input is free text, validated by config.sh" "type ${got}"
+fi
 
 if [ "${failed}" -ne 0 ]; then
 	echo "images self-test: ${failed} of ${total} case(s) failed" >&2
