@@ -1,9 +1,47 @@
-# Responsibility: the data of the package netbird that the caller workflow
-# (.github/workflows/ci.yml) reads. The base (wehagy/openwrt-ci) needs nothing
-# else: the package is built from openwrt/packages and tested by the generic
-# package test plus the runtime tests in packages/netbird/tests, which need the
-# repository secret NB_SETUP_KEY (see README.md); without it they are skipped.
+# Responsibility: the data of the package netbird that the caller workflows
+# (.github/workflows/ci.yml, upstream-pr.yml, custom-image.yml) read through
+# scripts/images/config.sh. The base (wehagy/openwrt-ci) names no package and
+# no device: the package is built from openwrt/packages, tested by the generic
+# package test and put into the images listed here; package-specific tests,
+# when they exist, go in packages/netbird/tests (see README.md): the NetBird
+# runtime tests there need the repository secret NB_SETUP_KEY (ci.yml passes it
+# as test_secrets); without it they are skipped.
 #
 # Keys:
-#   package  name of the package, a directory of openwrt/packages
+#   package   name of the package, a directory of openwrt/packages
+#   memory    optional; VM memory of the QEMU tests, NNNM from 64M to 1024M.
+#             Without it the base default (128M) applies. netbird needs 256M:
+#             at 128M it was OOM-killed on x86-64 (run 41480369349).
+#   targets   optional; QEMU test targets (ids of the base harness/targets.yml,
+#             separated by spaces). Without it the base tests all four
+#             (x86-64, armsr-armv8, malta-le, malta-be), which netbird needs.
+#   images    the firmware images built with the package:
+#     packages  extra packages of every image, Image Builder syntax (a name
+#               adds, -name removes)
+#     profiles  <target>/<subtarget>/<profile>, with :too-big at the end for
+#               an image known not to fit the flash (the job is green only
+#               when the Image Builder reports it). The 16 MB devices are
+#               expected too big. glinet_gl-mt1300 and buffalo_wzr-hp-g450h
+#               have 32 MB of flash and show whether the package fits one.
+#     limits    optional; size limit in bytes of the firmware partition, by
+#               profile (<target>/<subtarget>/<profile>), used by the summary
+#               of custom-image.yml. IMAGE_SIZE of the device in
+#               openwrt/openwrt, tag v25.12.6: glinet_gl-mt1300 32448k
+#               (ramips/image/mt7621.mk:1563), buffalo_wzr-hp-g450h 32256k
+#               (ath79/image/generic.mk:729).
 package: netbird
+memory: 256M
+images:
+  packages: luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut
+  profiles:
+    - x86/64/generic
+    - mediatek/filogic/xiaomi_mi-router-ax3000t-ubootmod
+    - mediatek/filogic/acer_predator-w6x-stock
+    - mediatek/filogic/bananapi_bpi-r3
+    - ath79/generic/tplink_archer-c7-v4:too-big
+    - ramips/mt7621/totolink_x5000r:too-big
+    - ramips/mt7621/glinet_gl-mt1300
+    - ath79/generic/buffalo_wzr-hp-g450h
+  limits:
+    ramips/mt7621/glinet_gl-mt1300: 33226752
+    ath79/generic/buffalo_wzr-hp-g450h: 33030144

@@ -1,0 +1,286 @@
+#!/usr/bin/env sh
+# Responsibility: prove, with fixed inputs and no network, the scripts that
+# turn the configuration and the web form of custom-image.yml into inputs of
+# the reusable base: scripts/images/config.sh (reads packages/<name>/config.yml
+# and refuses a bad one), custom.sh (the form: profile choice, other_profile,
+# source exclusivity, package list, device limit), pr-source.sh (head or
+# overlay of a pull request), summary.sh (source, overlay, size against the
+# limit, installed packages) and upstream-pr/cleanup.sh (refuses a branch that
+# is not an overlay branch). It also checks that the workflows agree with the
+# configuration: the profile choices of custom-image.yml are the profiles of
+# packages/netbird/config.yml, and every call of the base uses the same ref in
+# `uses:` and `ci_ref`. Runs every case and fails at the end if one failed.
+# Needs yq and jq.
+#
+# Usage: scripts/images/selftest.sh   (run from the root of the repository)
+# Environment variables: none.
+
+set -u
+
+here=$(cd "$(dirname "$0")" && pwd)
+root=$(cd "${here}/../.." && pwd)
+work=$(mktemp -d)
+trap 'rm -rf "${work}"' EXIT
+failed=0
+total=0
+
+# Reports one case. Arguments: $1 name, $2 "ok" or a reason.
+report() {
+	total=$((total + 1))
+	if [ "$2" = ok ]; then
+		echo "ok   $1"
+	else
+		echo "FAIL $1: $2"
+		failed=$((failed + 1))
+	fi
+}
+
+# Run a command with stdout in ${work}/out and stderr in ${work}/err; sets rc.
+#
+# Arguments: the command.
+run() {
+	rc=0
+	"$@" >"${work}/out" 2>"${work}/err" || rc=$?
+	out_text=$(cat "${work}/out")
+	err_text=$(cat "${work}/err")
+	stub_text=
+	if [ -f "${work}/stub.log" ]; then
+		stub_text=$(cat "${work}/stub.log")
+	fi
+}
+
+# The command must succeed and its stdout must contain the line.
+# Arguments: $1 case name, $2 line, rest the command.
+expect_line() {
+	name=$1
+	want=$2
+	shift 2
+	run "$@"
+	if [ "${rc}" -ne 0 ]; then
+		report "${name}" "exit ${rc}: ${err_text}"
+	elif grep -qxF -- "${want}" "${work}/out"; then
+		report "${name}" ok
+	else
+		report "${name}" "no line '${want}' in: ${out_text}"
+	fi
+}
+
+# The command must fail, print nothing on stdout and mention the text on stderr.
+# Arguments: $1 case name, $2 text, rest the command.
+expect_refused() {
+	name=$1
+	want=$2
+	shift 2
+	run "$@"
+	if [ "${rc}" -eq 0 ]; then
+		report "${name}" "succeeded: ${out_text}"
+	elif [ -s "${work}/out" ]; then
+		report "${name}" "printed on stdout: ${out_text}"
+	elif grep -qF -- "${want}" "${work}/err"; then
+		report "${name}" ok
+	else
+		report "${name}" "stderr lacks '${want}': ${err_text}"
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# config.sh
+# ---------------------------------------------------------------------------
+cfg=${here}/config.sh
+export PACKAGES_DIR="${root}/packages"
+expect_line "config: package" "package=netbird" "${cfg}" netbird
+expect_line "config: extra packages" "packages=luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut" "${cfg}" netbird
+expect_line "config: memory override of netbird" "memory=256M" "${cfg}" netbird
+expect_line "config: no targets means the base default" "targets=" "${cfg}" netbird
+expect_line "config: limits" "limits=ramips/mt7621/glinet_gl-mt1300 33226752 ath79/generic/buffalo_wzr-hp-g450h 33030144" "${cfg}" netbird
+expect_line "config: first profile" "profiles=x86/64/generic mediatek/filogic/xiaomi_mi-router-ax3000t-ubootmod mediatek/filogic/acer_predator-w6x-stock mediatek/filogic/bananapi_bpi-r3 ath79/generic/tplink_archer-c7-v4:too-big ramips/mt7621/totolink_x5000r:too-big ramips/mt7621/glinet_gl-mt1300 ath79/generic/buffalo_wzr-hp-g450h" "${cfg}" netbird
+expect_refused "config: unknown package" "is not a package of this repository" "${cfg}" nope
+expect_refused "config: invalid package name" "invalid package name" "${cfg}" 'Net;bird'
+expect_refused "config: no argument" "usage" "${cfg}"
+
+export PACKAGES_DIR="${work}/pk"
+mkdir -p "${PACKAGES_DIR}/a" "${PACKAGES_DIR}/b" "${PACKAGES_DIR}/c" "${PACKAGES_DIR}/d" "${PACKAGES_DIR}/e"
+printf 'package: a\n' >"${PACKAGES_DIR}/a/config.yml"
+printf 'package: other\n' >"${PACKAGES_DIR}/b/config.yml"
+printf 'package: c\nimages:\n  profiles:\n    - "x86/64/generic;id"\n' >"${PACKAGES_DIR}/c/config.yml"
+printf 'package: d\nmemory: 2G\n' >"${PACKAGES_DIR}/d/config.yml"
+printf 'package: e\ntargets: "x86-64\\n::error::x"\n' >"${PACKAGES_DIR}/e/config.yml"
+expect_line "config: a package with no images or overrides: empty profiles" "profiles=" "${cfg}" a
+expect_line "config: a package with no overrides: empty memory" "memory=" "${cfg}" a
+expect_refused "config: package key differs from the directory" "package is not b" "${cfg}" b
+expect_refused "config: character outside the allowed set in profiles" "profiles has a character" "${cfg}" c
+expect_refused "config: invalid memory" "memory must be NNNM" "${cfg}" d
+expect_refused "config: newline in a value cannot forge a command" "targets has a character" "${cfg}" e
+
+# ---------------------------------------------------------------------------
+# custom.sh (the form)
+# ---------------------------------------------------------------------------
+export PACKAGES_DIR="${root}/packages"
+cu=${here}/custom.sh
+# Run custom.sh with a form: the defaults are a valid form, "NAME=value"
+# arguments override them.
+#
+# Arguments: overrides.
+form() {
+	env LINE=main PROFILE=x86/64/generic OTHER_PROFILE= PACKAGES= PACKAGE= PR_NUMBER= \
+		FEED_REPOSITORY= FEED_REF= "$@" "${cu}"
+}
+expect_line "form: default line" "line=main" form
+expect_line "form: default profile" "profile=x86/64/generic" form
+expect_line "form: no package means no source" "source_mode=default" form
+expect_line "form: no package, no config packages" "packages=" form
+expect_line "form: user packages only" "packages=-dnsmasq dnsmasq-full" form "PACKAGES=-dnsmasq
+dnsmasq-full"
+expect_line "form: config packages and user packages" "packages=luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut -dnsmasq dnsmasq-full" \
+	form PACKAGE=netbird "PACKAGES=-dnsmasq dnsmasq-full"
+expect_line "form: package" "package=netbird" form PACKAGE=netbird
+expect_line "form: limit of a configured profile" "limit=33226752" form PACKAGE=netbird PROFILE=ramips/mt7621/glinet_gl-mt1300
+expect_line "form: no limit when unknown" "limit=" form PACKAGE=netbird PROFILE=x86/64/generic
+expect_line "form: other profile" "profile=ipq40xx/generic/glinet_gl-b1300" form PROFILE=other OTHER_PROFILE=ipq40xx/generic/glinet_gl-b1300
+expect_line "form: whitespace around other_profile" "profile=ipq40xx/generic/glinet_gl-b1300" form PROFILE=other "OTHER_PROFILE= ipq40xx/generic/glinet_gl-b1300 "
+expect_refused "form: other without other_profile" "fill other_profile" form PROFILE=other
+expect_refused "form: other_profile with a configured profile" "only used when profile is other" form OTHER_PROFILE=ipq40xx/generic/glinet_gl-b1300
+expect_refused "form: other_profile with two words" "other_profile must be" form PROFILE=other "OTHER_PROFILE=a/b/c d/e/f"
+expect_refused "form: other_profile of two parts" "other_profile must be" form PROFILE=other OTHER_PROFILE=a/b
+expect_refused "form: other_profile with a command" "other_profile must be" form PROFILE=other 'OTHER_PROFILE=a/b/c;id'
+expect_refused "form: unknown line" "line must be" form LINE=24.10
+expect_refused "form: unknown package" "is not a package of this repository" form PACKAGE=nope
+expect_refused "form: invalid packages text" "packages: allowed are" form 'PACKAGES=owut;id'
+expect_line "form: pull request" "source_mode=pr" form PACKAGE=netbird PR_NUMBER=31059
+expect_line "form: pull request number" "pr_number=31059" form PACKAGE=netbird PR_NUMBER=31059
+expect_line "form: fork" "source_mode=fork" form PACKAGE=netbird FEED_REPOSITORY=wehagy/packages FEED_REF=my-branch
+expect_line "form: fork ref alone" "feed_ref=my-branch" form PACKAGE=netbird FEED_REF=my-branch
+expect_refused "form: pr_number with feed_ref" "mutually exclusive" form PACKAGE=netbird PR_NUMBER=31059 FEED_REF=my-branch
+expect_refused "form: pr_number with feed_repository" "mutually exclusive" form PACKAGE=netbird PR_NUMBER=31059 FEED_REPOSITORY=wehagy/packages
+expect_refused "form: pull request without a package" "package must name it" form PR_NUMBER=31059
+expect_refused "form: fork without a package" "package must name it" form FEED_REF=my-branch
+for n in abc 0 007 -1 1.5 12345678 '1 2'; do
+	expect_refused "form: invalid pr_number '${n}'" "pr_number" form PACKAGE=netbird "PR_NUMBER=${n}"
+done
+
+# ---------------------------------------------------------------------------
+# pr-source.sh
+# ---------------------------------------------------------------------------
+ps=${here}/pr-source.sh
+sha=0123456789abcdef0123456789abcdef01234567
+matrix='{"include":[{"package":"netbird","dir":"net/netbird","local":true},{"package":"curl","dir":"net/curl","local":false}]}'
+# Arguments: overrides of the environment of pr-source.sh.
+decide() {
+	env LINE=25.12 PACKAGE=netbird PR_NUMBER=31059 PR_LINE=main HEAD_SHA="${sha}" \
+		MATRIX_ALL="${matrix}" OVERLAY_DIRS="net/netbird net/curl" "$@" "${ps}"
+}
+expect_line "pr-source: PR to master on line 25.12 is an overlay" "overlay=true" decide
+expect_line "pr-source: the overlay goes over the branch of the chosen line" "base_branch=openwrt-25.12" decide
+expect_line "pr-source: an overlay has no feed of its own" "feed_ref=" decide
+expect_line "pr-source: PR to master on line main builds the head" "overlay=false" decide LINE=main
+expect_line "pr-source: the head is built from openwrt/packages" "feed_repository=openwrt/packages" decide LINE=main
+expect_line "pr-source: the head is built as a commit" "feed_ref=${sha}" decide LINE=main
+expect_line "pr-source: PR to openwrt-25.12 on line main is an overlay on master" "base_branch=master" decide PR_LINE=25.12 LINE=main
+expect_line "pr-source: PR to openwrt-25.12 on line 25.12 builds the head" "overlay=false" decide PR_LINE=25.12
+expect_line "pr-source: another changed package of the PR is accepted" "overlay=true" decide PACKAGE=curl
+expect_refused "pr-source: the package is not changed by the PR" "does not change the package" decide PACKAGE=nginx
+expect_refused "pr-source: the message lists what the PR changes" "netbird curl" decide PACKAGE=nginx
+expect_refused "pr-source: invalid head sha" "invalid head sha" decide HEAD_SHA=zz
+expect_refused "pr-source: invalid pr number" "pr_number" decide PR_NUMBER=abc
+expect_refused "pr-source: unknown line" "unknown line" decide LINE=24.10
+
+# ---------------------------------------------------------------------------
+# summary.sh
+# ---------------------------------------------------------------------------
+sm=${here}/summary.sh
+art=${work}/art
+mkdir -p "${art}/images-netbird-25.12-glinet-gl-mt1300"
+head -c 30000000 /dev/zero >"${art}/images-netbird-25.12-glinet-gl-mt1300/openwrt-sysupgrade.bin"
+printf 'base-files - 1-r1\nnetbird - 0.78.1-r1\ndnsmasq-full - 2.91-r1\n' >"${art}/images-netbird-25.12-glinet-gl-mt1300/openwrt.manifest"
+printf 'sum\n' >"${art}/images-netbird-25.12-glinet-gl-mt1300/sha256sums"
+# Arguments: overrides of the environment of summary.sh.
+summary() {
+	env LINE=25.12 PROFILE=ramips/mt7621/glinet_gl-mt1300 PACKAGE=netbird PACKAGES="-dnsmasq dnsmasq-full" \
+		LIMIT=33226752 SOURCE_MODE=default FEED_REPOSITORY=openwrt/packages FEED_REF=openwrt-25.12 \
+		FEED_SHA="${sha}" IMAGE_RESULT=success "$@" "${sm}" "${art}"
+}
+expect_line "summary: size against the limit" "| openwrt-sysupgrade.bin | 30000000 | 90.29 % of 33226752 bytes, margin 3226752 bytes |" summary
+expect_line "summary: over the limit" "| openwrt-sysupgrade.bin | 30000000 | 106.15 % of 28261000 bytes, OVER by 1739000 bytes |" summary LIMIT=28261000
+expect_line "summary: limit unknown" "| openwrt-sysupgrade.bin | 30000000 | limit unknown (the Image Builder prints it only when the image does not fit) |" summary LIMIT=
+expect_line "summary: installed packages are listed" "netbird - 0.78.1-r1" summary
+expect_line "summary: manifest line count" "installed packages (openwrt.manifest, 3):" summary
+expect_line "summary: the manifest is not listed as an image" "- result of the image job: success" summary
+expect_line "summary: default source" "- source: the branch of openwrt/packages of line 25.12" summary
+expect_line "summary: commit" "- commit: ${sha}" summary
+expect_line "summary: no overlay" "- overlay: no" summary
+expect_line "summary: pull request overlay" "- overlay: yes (the ref above is a temporary branch of this repository, deleted after the build)" \
+	summary SOURCE_MODE=pr OVERLAY=true PR_NUMBER=31059 PR_LINE=main PR_HEAD_SHA=abc BASE_BRANCH=openwrt-25.12 OVERLAY_DIRS=net/netbird FEED_REPOSITORY=wehagy/openwrt-ci-packages FEED_REF=upstream-overlay/x
+expect_line "summary: pull request overlay source" "- source: pull request openwrt/packages#31059 (base branch of line main, head abc) built on line 25.12 by overlay: its changed directories (net/netbird) copied over the branch openwrt-25.12" \
+	summary SOURCE_MODE=pr OVERLAY=true PR_NUMBER=31059 PR_LINE=main PR_HEAD_SHA=abc BASE_BRANCH=openwrt-25.12 OVERLAY_DIRS=net/netbird
+expect_line "summary: pull request head source" "- source: pull request openwrt/packages#31059, head abc, built as it is (its base branch is line main)" \
+	summary SOURCE_MODE=pr OVERLAY=false PR_NUMBER=31059 PR_LINE=main PR_HEAD_SHA=abc
+expect_line "summary: fork source" "- source: feed given by the form (feed_repository, feed_ref)" summary SOURCE_MODE=fork
+expect_line "summary: no package" "- source: nothing was built (no package); the images use the official feed of line 25.12" summary PACKAGE=
+run env LINE=25.12 PROFILE=x IMAGE_RESULT=failure "${sm}" "${work}/missing"
+if [ "${rc}" -eq 0 ] && grep -q 'no image artifact' "${work}/out"; then
+	report "summary: no artifact" ok
+else
+	report "summary: no artifact" "rc ${rc}: ${out_text}"
+fi
+
+# ---------------------------------------------------------------------------
+# upstream-pr/cleanup.sh
+# ---------------------------------------------------------------------------
+cl=${root}/scripts/upstream-pr/cleanup.sh
+mkdir -p "${work}/bin"
+cat >"${work}/bin/gh" <<'EOF'
+#!/bin/sh
+echo "gh $*" >>"${STUB_LOG}"
+EOF
+chmod +x "${work}/bin/gh"
+: >"${work}/stub.log"
+: >"${work}/summary.md"
+cleanup() {
+	env PATH="${work}/bin:${PATH}" STUB_LOG="${work}/stub.log" GITHUB_REPOSITORY=o/r GITHUB_STEP_SUMMARY="${work}/summary.md" "$@" "${cl}"
+}
+run cleanup BRANCH=main
+if [ "${rc}" -ne 0 ] && grep -q "refusing to delete 'main'" "${work}/out" && [ ! -s "${work}/stub.log" ]; then
+	report "cleanup: refuses a branch outside upstream-overlay/" ok
+else
+	report "cleanup: refuses a branch outside upstream-overlay/" "rc ${rc}, stub: ${stub_text}"
+fi
+run cleanup BRANCH=upstream-overlay/pr1-2-3
+if [ "${rc}" -eq 0 ] && grep -qxF 'gh api -X DELETE repos/o/r/git/refs/heads/upstream-overlay/pr1-2-3' "${work}/stub.log"; then
+	report "cleanup: deletes an overlay branch" ok
+else
+	report "cleanup: deletes an overlay branch" "rc ${rc}, stub: ${stub_text}"
+fi
+
+# ---------------------------------------------------------------------------
+# The workflows agree with the configuration and with each other.
+# ---------------------------------------------------------------------------
+wf=${root}/.github/workflows/custom-image.yml
+want=$(yq -r '.images.profiles[] | sub(":too-big$", "")' "${root}/packages/netbird/config.yml" | tr '\n' ' ')
+have=$(yq -r '.on.workflow_dispatch.inputs.profile.options[]' "${wf}" | grep -vx other | tr '\n' ' ')
+if [ -n "${want}" ] && [ "${want}" = "${have}" ]; then
+	report "workflow: the profile choices are the configured profiles" ok
+else
+	report "workflow: the profile choices are the configured profiles" "config: ${want} / form: ${have}"
+fi
+last=$(yq -r '.on.workflow_dispatch.inputs.profile.options[-1]' "${wf}")
+if [ "${last}" = other ]; then
+	report "workflow: other is the last choice" ok
+else
+	report "workflow: other is the last choice" "last is ${last}"
+fi
+for f in ci upstream-pr custom-image; do
+	file=${root}/.github/workflows/${f}.yml
+	uses=$(grep -o 'wehagy/openwrt-ci/\.github/workflows/[a-z]*\.yml@[^ ]*' "${file}" | sed 's/.*@//' | sort -u | tr '\n' ' ')
+	cirefs=$(grep -o '^ *ci_ref: .*' "${file}" | sed 's/.*ci_ref: //' | sort -u | tr '\n' ' ')
+	if [ -n "${uses}" ] && [ "${uses}" = "${cirefs}" ]; then
+		report "workflow: ${f}.yml uses and ci_ref name the same ref (${uses% })" ok
+	else
+		report "workflow: ${f}.yml uses and ci_ref name the same ref" "uses: ${uses} / ci_ref: ${cirefs}"
+	fi
+done
+
+if [ "${failed}" -ne 0 ]; then
+	echo "images self-test: ${failed} of ${total} case(s) failed" >&2
+	exit 1
+fi
+echo "images self-test: ${total} cases passed"
