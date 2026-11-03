@@ -56,7 +56,8 @@ package test.
   256M`, because it was OOM-killed at 128M on x86-64, run 41480369349; and
   `apk_timeout: 120`, because `apk info -L` exceeded 30 s once on x86-64, run
   41437522326). Without `apk_timeout` the base uses labgrid's default, no
-  timeout. `services_disabled: [name, ...]` lists init scripts that the package
+  timeout. `config.sh` refuses `memory` outside 64M to 1024M and `apk_timeout` outside
+  30 to 600 in the first job, before any build. `services_disabled: [name, ...]` lists init scripts that the package
   leaves disabled by default: the service test skips them with a logged reason;
   every other script needs a running, stable instance (netbird lists none).
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
