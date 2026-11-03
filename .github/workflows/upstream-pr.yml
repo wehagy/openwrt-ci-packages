@@ -69,7 +69,9 @@ jobs:
           persist-credentials: false
 
       - name: Self-test the PR logic
-        run: scripts/upstream-pr/selftest.sh
+        run: |
+          scripts/upstream-pr/selftest.sh
+          scripts/workflow-selftest.sh
 
       # The input reaches the script only through the environment.
       - name: Resolve the pull request

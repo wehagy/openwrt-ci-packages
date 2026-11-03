@@ -61,7 +61,9 @@ jobs:
           persist-credentials: false
 
       - name: Self-test the configuration scripts
-        run: scripts/images/selftest.sh
+        run: |
+          scripts/images/selftest.sh
+          scripts/workflow-selftest.sh
 
       - name: Read packages/netbird/config.yml
         id: read

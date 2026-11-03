@@ -3,7 +3,7 @@
 # inputs: the validators of lib/common.sh (above all, that the review
 # repository can never be a repository of the organization openwrt), the
 # version comparison, the expansion of the source URL, the Makefile bump and
-# check-config.sh, then flow-selftest.sh and overlay-selftest.sh. Every case runs; the script fails at the end if one failed.
+# check-config.sh, then flow-selftest.sh, overlay-selftest.sh and workflow-selftest.sh. Every case runs; the script fails at the end if one failed.
 # Needs yq (check-config.sh). A rejected value is never printed.
 #
 # Usage:
@@ -208,5 +208,8 @@ record "flow-selftest.sh" "${flow_rc}" "see the FAIL lines above"
 overlay_rc=0
 "${script_dir}/overlay-selftest.sh" || overlay_rc=$?
 record "overlay-selftest.sh" "${overlay_rc}" "see the FAIL lines above"
+workflow_rc=0
+"${script_dir}/workflow-selftest.sh" || workflow_rc=$?
+record "workflow-selftest.sh" "${workflow_rc}" "see the FAIL lines above"
 
 finish

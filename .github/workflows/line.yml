@@ -15,6 +15,14 @@
 #
 # The workflows and the scripts of the base both come from its main (`@main`
 # and ci_ref: main must stay equal; scripts/images/selftest.sh checks it).
+#
+# Secrets (fail-safe): this workflow declares none and inherits none by default.
+# The QEMU test runs as one of two jobs: `test` (no secrets) when the caller
+# gives no test_secrets, `test_secrets` (the only job with `secrets: inherit`)
+# only when the caller names secrets there. A caller that passes no secrets, as
+# upstream-pr.yml, therefore never has a job of this workflow that holds one,
+# even if somebody adds `secrets: inherit` to it by mistake.
+# scripts/workflow-selftest.sh pins this.
 name: line
 
 on:
@@ -69,7 +77,7 @@ on:
         type: string
         default: ""
       test_secrets:
-        description: Names of the secrets exported to the tests (with secrets inherited)
+        description: Names of the secrets exported to the tests (the caller must also pass secrets; empty - the tests run without secrets)
         type: string
         default: ""
       with_images:
@@ -81,8 +89,26 @@ permissions:
   contents: read
 
 jobs:
+  # A feed repository without a ref would build the default branch of that
+  # repository, silently: an overlay that is missing for a line (the callers
+  # read the commit from a JSON map) must stop the leg here instead.
+  check:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 2
+    steps:
+      - name: Check the feed
+        env:
+          FEED_REPOSITORY: ${{ inputs.feed_repository }}
+          FEED_REF: ${{ inputs.feed_ref }}
+        run: |
+          if [ -n "${FEED_REPOSITORY}" ] && [ -z "${FEED_REF}" ]; then
+            echo "::error::feed_repository is set but feed_ref is empty: no commit to build for this line"
+            exit 1
+          fi
+
   # packages: write because build.yml may rebuild the SDK image (GHCR).
   build:
+    needs: check
     permissions:
       contents: read
       packages: write
@@ -97,7 +123,27 @@ jobs:
       profiles: ${{ inputs.profiles }}
       targets: ${{ inputs.targets }}
 
+  # The QEMU test without secrets: the caller asked for none.
   test:
+    if: ${{ inputs.test_secrets == '' }}
+    needs: build
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    with:
+      ci_ref: main
+      line: ${{ inputs.line }}
+      package: ${{ inputs.package }}
+      source: artifact
+      tests_path: ${{ inputs.tests_path }}
+      targets: ${{ inputs.targets }}
+      memory: ${{ inputs.memory }}
+      apk_timeout: ${{ inputs.apk_timeout }}
+      services_disabled: ${{ inputs.services_disabled }}
+
+  # The QEMU test with the secrets the caller named (test_secrets): the only
+  # job that inherits the secrets of the caller, and it does not run without
+  # that request. Same inputs as `test`.
+  test_secrets:
+    if: ${{ inputs.test_secrets != '' }}
     needs: build
     uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
@@ -127,7 +173,7 @@ jobs:
   # The outcome of THIS line, as a file. It runs whatever happened before.
   result:
     if: ${{ always() }}
-    needs: [build, test, image]
+    needs: [build, test, test_secrets, image]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     steps:
@@ -140,7 +186,7 @@ jobs:
           LINE: ${{ inputs.line }}
           PACKAGE: ${{ inputs.package }}
           BUILD: ${{ needs.build.result }}
-          TEST: ${{ needs.test.result }}
+          TEST: ${{ needs.test.result != 'skipped' && needs.test.result || needs.test_secrets.result }}
           IMAGE: ${{ inputs.with_images && needs.image.result || 'not requested' }}
           FEED_SHA: ${{ needs.build.outputs.feed_sha }}
         run: scripts/line-result.sh line-result/result.json
