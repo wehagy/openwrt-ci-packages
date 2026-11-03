@@ -44,6 +44,7 @@ jobs:
       packages: ${{ steps.read.outputs.packages }}
       targets: ${{ steps.read.outputs.targets }}
       memory: ${{ steps.read.outputs.memory }}
+      apk_timeout: ${{ steps.read.outputs.apk_timeout }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -102,6 +103,7 @@ jobs:
       tests_path: packages/${{ needs.config.outputs.package }}/tests
       targets: ${{ needs.config.outputs.targets }}
       memory: ${{ needs.config.outputs.memory }}
+      apk_timeout: ${{ needs.config.outputs.apk_timeout }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 
@@ -116,6 +118,7 @@ jobs:
       tests_path: packages/${{ needs.config.outputs.package }}/tests
       targets: ${{ needs.config.outputs.targets }}
       memory: ${{ needs.config.outputs.memory }}
+      apk_timeout: ${{ needs.config.outputs.apk_timeout }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 

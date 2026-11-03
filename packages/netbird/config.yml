@@ -12,6 +12,14 @@
 #   memory    optional; VM memory of the QEMU tests, NNNM from 64M to 1024M.
 #             Without it the base default (128M) applies. netbird needs 256M:
 #             at 128M it was OOM-killed on x86-64 (run 41480369349).
+#   apk_timeout  optional; timeout in seconds (30 to 600) of each apk command of
+#             the generic test in the VM (apk info -L, apk info -e, apk list
+#             -I). Without it the base uses labgrid's default, which is no
+#             timeout. netbird sets 120: `apk info -L` right after the install
+#             took 0.5 to 15 s in healthy runs and once more than 30 s (run
+#             41437522326, job 125258840649, x86-64 on main, 128M; fix
+#             c0d3f01 of the base). The summary of each VM job prints the
+#             value and the measured duration of `apk info -L`.
 #   targets   optional; QEMU test targets (ids of the base harness/targets.yml,
 #             separated by spaces). Without it the base tests all four
 #             (x86-64, armsr-armv8, malta-le, malta-be), which netbird needs.
@@ -31,6 +39,7 @@
 #               (ath79/image/generic.mk:729).
 package: netbird
 memory: 256M
+apk_timeout: 120
 images:
   packages: luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut
   profiles:

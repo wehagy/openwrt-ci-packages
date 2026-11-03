@@ -91,6 +91,7 @@ export PACKAGES_DIR="${root}/packages"
 expect_line "config: package" "package=netbird" "${cfg}" netbird
 expect_line "config: extra packages" "packages=luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut" "${cfg}" netbird
 expect_line "config: memory override of netbird" "memory=256M" "${cfg}" netbird
+expect_line "config: apk timeout of netbird" "apk_timeout=120" "${cfg}" netbird
 expect_line "config: no targets means the base default" "targets=" "${cfg}" netbird
 expect_line "config: limits" "limits=ramips/mt7621/glinet_gl-mt1300 33226752 ath79/generic/buffalo_wzr-hp-g450h 33030144" "${cfg}" netbird
 expect_line "config: first profile" "profiles=x86/64/generic mediatek/filogic/xiaomi_mi-router-ax3000t-ubootmod mediatek/filogic/acer_predator-w6x-stock mediatek/filogic/bananapi_bpi-r3 ath79/generic/tplink_archer-c7-v4:too-big ramips/mt7621/totolink_x5000r:too-big ramips/mt7621/glinet_gl-mt1300 ath79/generic/buffalo_wzr-hp-g450h" "${cfg}" netbird
@@ -99,16 +100,19 @@ expect_refused "config: invalid package name" "invalid package name" "${cfg}" 'N
 expect_refused "config: no argument" "usage" "${cfg}"
 
 export PACKAGES_DIR="${work}/pk"
-mkdir -p "${PACKAGES_DIR}/a" "${PACKAGES_DIR}/b" "${PACKAGES_DIR}/c" "${PACKAGES_DIR}/d" "${PACKAGES_DIR}/e"
+mkdir -p "${PACKAGES_DIR}/a" "${PACKAGES_DIR}/b" "${PACKAGES_DIR}/c" "${PACKAGES_DIR}/d" "${PACKAGES_DIR}/e" "${PACKAGES_DIR}/f"
 printf 'package: a\n' >"${PACKAGES_DIR}/a/config.yml"
 printf 'package: other\n' >"${PACKAGES_DIR}/b/config.yml"
 printf 'package: c\nimages:\n  profiles:\n    - "x86/64/generic;id"\n' >"${PACKAGES_DIR}/c/config.yml"
 printf 'package: d\nmemory: 2G\n' >"${PACKAGES_DIR}/d/config.yml"
+printf 'package: f\napk_timeout: 2m\n' >"${PACKAGES_DIR}/f/config.yml"
 printf 'package: e\ntargets: "x86-64\\n::error::x"\n' >"${PACKAGES_DIR}/e/config.yml"
 expect_line "config: a package with no images or overrides: empty profiles" "profiles=" "${cfg}" a
 expect_line "config: a package with no overrides: empty memory" "memory=" "${cfg}" a
 expect_refused "config: package key differs from the directory" "package is not b" "${cfg}" b
 expect_refused "config: character outside the allowed set in profiles" "profiles has a character" "${cfg}" c
+expect_line "config: no apk_timeout means the labgrid default" "apk_timeout=" "${cfg}" a
+expect_refused "config: invalid apk_timeout" "apk_timeout must be whole seconds" "${cfg}" f
 expect_refused "config: invalid memory" "memory must be NNNM" "${cfg}" d
 expect_refused "config: newline in a value cannot forge a command" "targets has a character" "${cfg}" e
 

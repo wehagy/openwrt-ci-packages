@@ -136,6 +136,7 @@ jobs:
       tests_path: ${{ matrix.tests_path }}
       targets: ${{ matrix.targets }}
       memory: ${{ matrix.memory }}
+      apk_timeout: ${{ matrix.apk_timeout }}
 
   image-pr:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -188,6 +189,7 @@ jobs:
       tests_path: ${{ matrix.tests_path }}
       targets: ${{ matrix.targets }}
       memory: ${{ matrix.memory }}
+      apk_timeout: ${{ matrix.apk_timeout }}
 
   image-other:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
