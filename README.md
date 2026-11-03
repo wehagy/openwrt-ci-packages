@@ -6,11 +6,52 @@ repository holds the packages (`packages/<name>/`: configuration and
 package-specific tests); the base holds the workflows, scripts and the generic
 package test.
 
+## Release lines
+
+The lines a package is built, tested and imaged on are its own, in
+`packages/<name>/config.yml`: `lines: [main, "25.12"]`. No workflow, script or
+report names a line; each reads that list (`scripts/images/config.sh`) and the
+base's `harness/lines.yml` (`packages_branch` of each line, checked out as
+`ci-base/`; `scripts/lib/lines.sh`). The exception is the list of choices of the
+`line` field of `custom-image.yml`, because a GitHub form cannot read files.
+
+- **Adding a line** (for example `"26.12"`): add it to `harness/lines.yml` and
+  `harness/targets.yml` of the base, add it to the `lines:` list of the package
+  and to the `line` choices of `custom-image.yml`. Nothing else changes: the next
+  run runs the new line in parallel with the others.
+- **Removing a line**: delete it from the `lines:` list of the package.
+- **The reference line** is the line of the base whose `packages_branch` is
+  `master` (`main`). Every package must list it: the bump commit of `update.yml`
+  is made on it, its result is what opens the draft pull request, and the
+  upstream pull request is generated for `master`. The other lines build the
+  bump as an overlay on their own `packages_branch` and may fail without
+  stopping the pull request; their failure is in the description.
+- **Validation** (fail closed, before any build): `lines` must be a list of
+  quoted strings (an unquoted `26.10` would be the number `26.1`), each line must
+  exist in the base's `lines.yml`, without repeats, and the reference line must
+  be listed. The pull request base branch maps to a line through the same file
+  (`packages_branch`), never by hand.
+- **One leg per line.** The callers run `.github/workflows/line.yml` (build, QEMU
+  test and images of one package on one line, through the base) with a matrix
+  over the lines. `needs.<job>.result` of a matrix is one aggregate and the
+  outputs of its legs overwrite each other, so each leg ends with a job that
+  writes its own outcome as the artifact `line-result-<package>-<line>`
+  (`scripts/line-result.sh`): `update.yml` decides from those files
+  (`scripts/decide.sh`), the pull request description is built from them and from
+  the job list (`scripts/report.py`), and `ci.yml`/`upstream-pr.yml` print one
+  row per leg (`scripts/line-summary.sh`).
+- Offline proof: the self-tests use `scripts/stubs/lines.yml`, a stand-in for the
+  base's file with a fake third line (`26.12`), and prove three lines, one line
+  failing while the others pass, and the removal of `25.12`
+  (`scripts/images/selftest.sh`, `scripts/upstream-pr/selftest.sh`,
+  `scripts/overlay-selftest.sh`, `scripts/report_selftest.py`).
+
 ## Layout
 
 - `packages/<name>/config.yml`: data of the package, read by
   `scripts/images/config.sh`: `package` (a directory of `openwrt/packages`),
-  `images` (extra `packages`, `profiles`, optional `limits`) and, only when the
+  `lines` (see "Release lines"), `images` (extra `packages`, `profiles`, optional
+  `limits`) and, only when the
   package needs something other than the base defaults, `memory`, `targets`,
   `apk_timeout` and `services_disabled` of the QEMU tests. The file documents
   every key.
@@ -21,7 +62,10 @@ package test.
   For `netbird` they are the runtime tests described in "NetBird runtime
   tests" below.
 - `.github/workflows/ci.yml`: calls the base for `netbird` on push to
-  `feat/**` and on `workflow_dispatch` (`refresh_sdk`, `lines`).
+  `feat/**` and on `workflow_dispatch` (`refresh_sdk`; `lines`: free text, some
+  of the package's lines separated by spaces, empty: all).
+- `.github/workflows/line.yml`: reusable; build, test and images of one package
+  on one line (see "Release lines").
 - `.github/workflows/custom-image.yml`: builds one image from a web form (see
   "Building a custom image").
 - `scripts/images/`: `config.sh` (reads a package's `config.yml`), `custom.sh`
@@ -44,14 +88,14 @@ package test.
 | Job                          | Calls                         | Notes                                              |
 |------------------------------|-------------------------------|----------------------------------------------------|
 | `config`                     | -                             | reads `packages/netbird/config.yml`                |
-| `build-25-12`, `build-main`  | `build.yml`                   | `packages: write`: may rebuild the SDK image       |
-| `test-25-12`, `test-main`    | `test.yml`, `source: artifact` | `tests_path`, `test_secrets: NB_SETUP_KEY`, `secrets: inherit` |
-| `image-25-12`, `image-main`  | `images.yml`                  | `profiles` and `packages` of `config.yml`          |
+| `lines`                      | `line.yml`, one leg per line  | `packages: write`, `fail-fast: false`; `line.yml` calls `build.yml`, `test.yml` (`source: artifact`, `tests_path`, `test_secrets: NB_SETUP_KEY`, `secrets: inherit`) and `images.yml` (`profiles` and `packages` of `config.yml`) |
+| `summary`                    | -                             | one row per line from the `line-result-*` artifacts |
 
 - Each call passes `ci_ref`: the ref of `wehagy/openwrt-ci` the scripts are
   checked out from. It must equal the ref after `@` in `uses:`. No tags are
   used. Both are `main` in `ci.yml`, `upstream-pr.yml` and `custom-image.yml`
-  (`scripts/images/selftest.sh` fails if `uses:` and `ci_ref` differ).
+  (`scripts/images/selftest.sh` fails if `uses:` and `ci_ref` differ). The base is
+  called from `line.yml` and `custom-image.yml` only.
 - What `config.yml` gives the calls: `build.yml` gets `profiles` (its default
   `archs` are the architectures of the QEMU targets plus those of the
   profiles) and `targets`; `test.yml` gets `targets`, `memory`, `apk_timeout` and
@@ -82,9 +126,10 @@ have no `secrets:` and no `test_secrets`; the NetBird runtime tests that need
 `NB_SETUP_KEY` skip, which is expected. The `tests/` of `packages/<name>/` of
 this repository still run (that code is ours, not the PR's).
 
-1. `resolve` (self-test first): the PR's base branch gives the line (`master`:
-   `main`, `openwrt-25.12`: `25.12`; any other base fails with `unsupported
-   base branch`). The changed packages are the directories that hold a changed
+1. `resolve` (self-test first): the PR's base branch gives the line (the line
+   of the base's `lines.yml` whose `packages_branch` is that branch; any other
+   base fails with `unsupported base branch`). A package with
+   `packages/<name>/` must list that line in its `config.yml`. The changed packages are the directories that hold a changed
    path and have a `Makefile` in the PR tree (the shallowest one, so `src/Makefile`
    belongs to its package); renames count at both paths. A PR with no package
    or with more than 5 fails; a package the PR only removes has no `Makefile`
@@ -100,9 +145,10 @@ this repository still run (that code is ours, not the PR's).
    The head of the PR is built as it is: the base branch is not merged into it
    and `refs/pull/<n>/merge` is not used (the base refuses that ref).
 3. Packages with `packages/<name>/` here: also `images.yml`, and the whole
-   pipeline again on the other line. The base builds one repository and ref, so
-   `compose` pushes `upstream-overlay/pr<n>-<run id>-<attempt>` to this
-   repository: the other line's `openwrt/packages` branch with the changed
+   pipeline again on every other line of their `lines:`, in parallel (one leg
+   per package and line, `line.yml`). The base builds one repository and ref, so
+   `compose` pushes `upstream-overlay/pr<n>-<run id>-<attempt>-<line>` to this
+   repository for each such line: its `openwrt/packages` branch with the changed
    directories of the PR copied over it (one root commit, upstream `.github/`
    dropped), and `build.yml` builds its commit SHA; `cleanup` deletes the branch
    when the builds are done. Packages without `packages/<name>/` run on the
@@ -112,8 +158,9 @@ this repository still run (that code is ours, not the PR's).
    `profiles`, `packages`, `targets` and `memory` from its `config.yml`
    (`resolve.sh` reads them with `scripts/images/config.sh`).
 
-Limit: one failed build of a package skips the test jobs of all packages of
-that line (they need the whole matrix).
+A failed leg does not stop the others: build, test and images are jobs of one
+leg, so a failed build of one package or line skips only the test and images of
+that package on that line. The `report` job prints one row per leg.
 
 ## Building a custom image (`custom-image.yml`)
 
@@ -125,7 +172,7 @@ is known, and the packages the image installs.
 
 | Field             | Meaning                                                                      |
 |-------------------|------------------------------------------------------------------------------|
-| `line`            | `main` or `25.12`                                                            |
+| `line`            | a line of the package (`lines:` of its `config.yml`); the choices of the form are the one place that lists lines |
 | `profile`         | one of the configured profiles (`packages/netbird/config.yml`) or `other`    |
 | `other_profile`   | with `other`: `<target>/<subtarget>/<profile>`, e.g. `ipq40xx/generic/glinet_gl-b1300` |
 | `packages`        | extra packages; a name adds it, `-name` removes it (`-dnsmasq dnsmasq-full`) |
@@ -162,10 +209,10 @@ independent of the pull request; `package` must be one of the packages it
 changes. The jobs `source` and `compose` reuse `scripts/upstream-pr/`
 (`resolve.sh`, `compose.sh`, `cleanup.sh`, the same as `upstream-pr.yml`):
 
-- the base branch of the pull request belongs to the chosen line (`master`:
-  `main`, `openwrt-25.12`: `25.12`): its head commit is built as it is, from
-  `openwrt/packages`;
-- otherwise (e.g. a pull request to `master` and line `25.12`): its changed
+- the base branch of the pull request is the `packages_branch` of the chosen
+  line (the base's `lines.yml` maps branch to line): its head commit is built as
+  it is, from `openwrt/packages`;
+- otherwise (a pull request to another line's branch): its changed
   package directories are copied over the branch of the chosen line, pushed to
   a temporary branch `upstream-overlay/custom-pr<n>-<run id>-<attempt>` of this
   repository, built from there, and the branch is deleted when the build is
@@ -201,11 +248,11 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 |---|---|
 | `detect` | runs the self-tests, validates `packages/netbird/config.yml`, compares the latest release with `PKG_VERSION` of the review repository and looks for the two branches and for pull requests (any state) of that version. Read only. Branches without an open pull request are orphans: the job fails (see "Orphan branches"). When an update is needed it also runs the production guard (`scripts/check-fork-base.sh`, see "Production guard"). |
 | `prepare` | token job 1 (`environment: review`). Proves the hash method on the current version, bumps `PKG_VERSION`, `PKG_RELEASE` (reset to 1) and `PKG_HASH`, commits `netbird: update to X.Y.Z` with `Signed-off-by: Wesley Gimenes <wehagy@proton.me>`, pushes two branches to the review repository: `ci/netbird-base-X.Y.Z` (the starting commit) and `ci/netbird-update-X.Y.Z` (the commit). A branch that exists is never overwritten. It first proves that the token can push and open pull requests (`scripts/check-token.sh`). A failure or cancellation after the first push deletes the branches this run created. |
-| `compose` | after `prepare`. Line `25.12` must build `openwrt-25.12`, not master's feed, so this job takes the `openwrt-25.12` branch of `openwrt/packages`, copies over it only `package_path` (`net/netbird`) from the update branch (`scripts/upstream-pr/compose.sh`, the overlay of `upstream-pr.yml`, with `SOURCE_URL`/`SOURCE_REF` naming the review repository) and pushes one root commit as `upstream-overlay/update-<run id>-<attempt>` to **this** repository. `contents: write`, the `GITHUB_TOKEN`, no secret, no package code. |
-| `build-*`, `test-*`, `image-*` | the base, for both lines, with the same settings as `ci.yml`: `detect` reads `packages/netbird/config.yml` with `scripts/images/config.sh` and passes `profiles` and `targets` to `build-*`, `targets`, `memory` (256M), `apk_timeout` (120) and `services_disabled` to `test-*`, `profiles` and `packages` to `image-*`. Line `main`: `feed_repository` = review repository and `feed_ref` = the SHA of the update branch (the bump commit as it is). Line `25.12`: `feed_repository` = this repository and `feed_ref` = the overlay commit of `compose`, i.e. `openwrt-25.12` plus `net/netbird` of the bump. `test-*` get `secrets: inherit` and `test_secrets: NB_SETUP_KEY` (not the token, see "Secret `TEST_UPSTREAM_TOKEN`"); build and image jobs get no secrets. |
-| `cleanup` | deletes the overlay branch (`scripts/upstream-pr/cleanup.sh`, only under `upstream-overlay/`) once `build-25-12` is done, on success, failure and cancellation, also when `compose` failed after its push (no branch: it only says so). `contents: write`. A killed run (forced cancellation, lost runner) leaves the branch: delete it with `gh api --method DELETE repos/wehagy/openwrt-ci-packages/git/refs/heads/upstream-overlay/update-<run id>-<attempt>`; the job `sweep` of a later run deletes such a branch once it is a day old. |
+| `compose` | after `prepare`. Every line other than the reference must build its own `packages_branch`, not master's feed, so this job takes that branch of `openwrt/packages` for each such line, copies over it only `package_path` (`net/netbird`) from the update branch (`scripts/upstream-pr/compose-lines.sh` runs `compose.sh`, the overlay of `upstream-pr.yml`, with `SOURCE_URL`/`SOURCE_REF` naming the review repository) and pushes one root commit per line as `upstream-overlay/update-<run id>-<attempt>-<line>` to **this** repository. One job, because the outputs of matrix legs overwrite each other; its `matrix` output lists, for every line, the repository and commit it builds. A line that cannot be composed is reported and left out; it never stops the reference line. `contents: write`, the `GITHUB_TOKEN`, no secret, no package code. |
+| `lines` | `line.yml` (build, QEMU test, images through the base), one matrix leg per line of the package, in parallel, `fail-fast: false`; same settings as `ci.yml`: `detect` reads `packages/netbird/config.yml` with `scripts/images/config.sh` and passes `profiles` and `targets` to the build, `targets`, `memory` (256M), `apk_timeout` (120) and `services_disabled` to the test, `profiles` and `packages` to the images. The reference line: `feed_repository` = review repository and `feed_ref` = the SHA of the update branch (the bump commit as it is). Every other line: `feed_repository` = this repository and `feed_ref` = its overlay commit from `compose`, i.e. its `packages_branch` plus `net/netbird` of the bump. The tests get `secrets: inherit` and `test_secrets: NB_SETUP_KEY` (not the token, see "Secret `TEST_UPSTREAM_TOKEN`"); build and images get no secrets. Each leg uploads `line-result-netbird-<line>`. |
+| `cleanup` | deletes the overlay branches (`scripts/upstream-pr/cleanup.sh`, only under `upstream-overlay/`, one per line, names fixed by the run) once every leg is done, on success, failure and cancellation, also when `compose` failed after its push (no branch: it only says so). `contents: write`. A killed run (forced cancellation, lost runner) leaves the branch: delete it with `gh api --method DELETE repos/wehagy/openwrt-ci-packages/git/refs/heads/upstream-overlay/update-<run id>-<attempt>-<line>`; the job `sweep` of a later run deletes such a branch once it is a day old. |
 | `sweep` | no `needs`, nothing waits for it. Deletes `upstream-overlay/update-*` branches of this repository older than 24 h (`scripts/upstream-pr/sweep.sh`, through `cleanup.sh` and its guards): the branch a killed run left, since `cleanup` cannot run in a dead run. Younger branches (a run in progress) and `upstream-overlay/pr*`/`custom-pr*` (other workflows) stay. `contents: write`, the `GITHUB_TOKEN`, no secret. It fails when a delete or the listing fails. |
-| `publish` | token job 2 (`environment: review`). Line `main` green (build, QEMU test, images): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Line `25.12` may fail; the description says so. The description names what each line built: line `main` the review repository at the bump commit, line `25.12` "overlay of net/netbird onto openwrt-25.12 @ <sha of that branch>" with the overlay commit of this repository; a failure of `25.12` is the backport check failing (for example a Go version `openwrt-25.12` does not have), and the pull request still opens. The description has a section "Test suites that ran", counted from the `results.xml` that every QEMU job uploads (`publish` downloads them with `gh run download`): per line, the generic test and the package tests (`packages/netbird/tests`) with passed / skipped / failed and the targets, the names of the secrets the test jobs pass (`test_secrets`, here `NB_SETUP_KEY`), every skipped test with its reason, a failed one, and a target whose job left no result file; `NOT RUN` when the directory does not exist. A skipped test is flagged as not a pass, and a green QEMU job never reads as a runtime pass. The `Run tested` line of the upstream link carries the same package test counts of line `main`. The row `Upstream base` of the description holds the base commit and its relation to `openwrt/packages` master (see "Production guard") |
+| `publish` | token job 2 (`environment: review`). The reference line green (build, QEMU test, images, by its own `line-result` file and by the job list; `scripts/decide.sh`): opens the draft pull request `ci/netbird-base-X.Y.Z` <- `ci/netbird-update-X.Y.Z` in the review repository, unless one is open. Otherwise (also when the run fails or is cancelled at any point of `publish`) deletes both branches, except those of an open pull request. Every other line may fail or have no result; the description says so. The description names what each line built: the reference line the review repository at the bump commit, each other line "overlay of net/netbird onto <its packages_branch> @ <sha of that branch>" with the overlay commit of this repository; a failure of such a line is the backport check failing (for example a Go version its branch does not have), and the pull request still opens. The description has a section "Test suites that ran", counted from the `results.xml` that every QEMU job uploads (`publish` downloads them with `gh run download`): per line, the generic test and the package tests (`packages/netbird/tests`) with passed / skipped / failed and the targets, the names of the secrets the test jobs pass (`test_secrets`, here `NB_SETUP_KEY`), every skipped test with its reason, a failed one, and a target whose job left no result file; `NOT RUN` when the directory does not exist. A skipped test is flagged as not a pass, and a green QEMU job never reads as a runtime pass. The `Run tested` line of the upstream link carries the same package test counts of line `main`. The row `Upstream base` of the description holds the base commit and its relation to `openwrt/packages` master (see "Production guard") |
 
 - Start: daily at 05:17 UTC (the schedule runs from the default branch only) and
   `workflow_dispatch` with the optional input `version` (`X.Y.Z`, newer than the
@@ -271,8 +318,8 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 - Go module vendoring is not in the Makefile: nothing else changes.
 - The base is called at `@main` with `ci_ref: main`. The commit it reports
   having built (`feed_sha` output of `build.yml`) is what the description shows,
-  and `publish` refuses to open a pull request if line `main` built another
-  commit than the bump commit (line `25.12` is checked the same way against the overlay commit; a mismatch there fails `publish` too and no pull request opens). The review repository must be public (the base
+  and `publish` refuses to open a pull request if the reference line built another
+  commit than the bump commit (every other line is checked the same way against its overlay commit; a mismatch there fails `publish` too and no pull request opens). The review repository must be public (the base
   checks the feed out with the `github.token` of this repository).
 
 ## Secrets
