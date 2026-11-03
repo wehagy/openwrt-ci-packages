@@ -26,9 +26,8 @@
 # `secrets:`. Nothing is written to openwrt/packages. The overlay branch of this
 # repository (upstream-overlay/*) is deleted when the build is done.
 #
-# The base is called at `@feat/image-inputs` with `ci_ref: feat/image-inputs`
-# (both must stay equal; TEMPORARY, back to main when the base branch is
-# merged). The profile choices are the profiles of packages/netbird/config.yml
+# The base is called at `@main` with `ci_ref: main` (both must stay equal).
+# The profile choices are the profiles of packages/netbird/config.yml
 # (scripts/images/selftest.sh fails if they differ).
 name: custom-image
 
@@ -106,7 +105,7 @@ jobs:
         uses: actions/checkout@v7.0.1
         with:
           repository: wehagy/openwrt-ci
-          ref: feat/image-inputs
+          ref: main
           path: ci-base
           persist-credentials: false
 
@@ -229,9 +228,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.config.outputs.line }}
       package: ${{ needs.config.outputs.package }}
       archs: "@profiles"
@@ -248,9 +247,9 @@ jobs:
       && (needs.build.result == 'success'
       || (needs.build.result == 'skipped' && needs.config.outputs.package == '')) }}
     needs: [config, build]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.config.outputs.line }}
       package: ${{ needs.config.outputs.package }}
       profiles: ${{ needs.config.outputs.profile }}

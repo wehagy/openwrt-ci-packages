@@ -42,11 +42,8 @@ package test.
 
 - Each call passes `ci_ref`: the ref of `wehagy/openwrt-ci` the scripts are
   checked out from. It must equal the ref after `@` in `uses:`. No tags are
-  used. **Temporary:** both are `feat/image-inputs` in `ci.yml`,
-  `upstream-pr.yml` and `custom-image.yml` while the base branch that adds the
-  `profiles`, `packages`, `archs`, `targets` and `memory` inputs is not merged;
-  they go back to `main` then (`scripts/images/selftest.sh` fails if `uses:` and
-  `ci_ref` differ).
+  used. Both are `main` in `ci.yml`, `upstream-pr.yml` and `custom-image.yml`
+  (`scripts/images/selftest.sh` fails if `uses:` and `ci_ref` differ).
 - What `config.yml` gives the calls: `build.yml` gets `profiles` (its default
   `archs` are the architectures of the QEMU targets plus those of the
   profiles) and `targets`; `test.yml` gets `targets`, `memory`, `apk_timeout` and
@@ -102,8 +99,8 @@ this repository still run (that code is ours, not the PR's).
    dropped), and `build.yml` builds its commit SHA; `cleanup` deletes the branch
    when the builds are done. Packages without `packages/<name>/` run on the
    PR's line only.
-4. The base is called at the ref named in the file (temporarily
-   `feat/image-inputs`) with the same `ci_ref`. Each package gets its
+4. The base is called at the ref named in the file (`main`) with the same
+   `ci_ref`. Each package gets its
    `profiles`, `packages`, `targets` and `memory` from its `config.yml`
    (`resolve.sh` reads them with `scripts/images/config.sh`).
 

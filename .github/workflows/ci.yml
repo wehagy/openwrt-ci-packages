@@ -3,10 +3,7 @@
 # QEMU, build its images. Runs on push to feature branches and by hand.
 #
 # The workflows and the scripts both come from the same ref of the base
-# (`@<ref>` and ci_ref: <ref> must stay equal). TEMPORARY: the ref is
-# feat/image-inputs, the branch of the base that adds the profiles, packages,
-# archs, targets and memory inputs; it goes back to main when that branch is
-# merged.
+# (`@<ref>` and ci_ref: <ref> must stay equal); the ref is main.
 #
 # What is built, tested and imaged comes from packages/netbird/config.yml (read
 # by scripts/images/config.sh): the profiles and packages of the images and,
@@ -67,9 +64,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
@@ -82,9 +79,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
@@ -95,9 +92,9 @@ jobs:
   # secrets: inherit + test_secrets: the named secrets reach only the tests.
   test-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       source: artifact
@@ -111,9 +108,9 @@ jobs:
 
   test-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}
       source: artifact
@@ -127,9 +124,9 @@ jobs:
 
   image-25-12:
     needs: [config, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: "25.12"
       package: ${{ needs.config.outputs.package }}
       profiles: ${{ needs.config.outputs.profiles }}
@@ -137,9 +134,9 @@ jobs:
 
   image-main:
     needs: [config, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: main
       package: ${{ needs.config.outputs.package }}
       profiles: ${{ needs.config.outputs.profiles }}

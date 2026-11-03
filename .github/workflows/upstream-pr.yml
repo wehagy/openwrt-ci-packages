@@ -12,7 +12,7 @@
 # `workflow_dispatch` only (never pull_request_target). It builds the head of
 # the PR (refs/pull/<n>/head, as a commit SHA) without merging its base.
 #
-# The base is called at `@feat/image-inputs` with `ci_ref: feat/image-inputs` (both must stay equal).
+# The base is called at `@main` with `ci_ref: main` (both must stay equal).
 name: upstream-pr
 
 on:
@@ -109,9 +109,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       feed_repository: openwrt/packages
@@ -127,9 +127,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_all) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       source: artifact
@@ -145,9 +145,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       profiles: ${{ matrix.profiles }}
@@ -164,9 +164,9 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       feed_repository: ${{ github.repository }}
@@ -181,9 +181,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       source: artifact
@@ -199,9 +199,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
     with:
-      ci_ref: feat/image-inputs
+      ci_ref: main
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       profiles: ${{ matrix.profiles }}
