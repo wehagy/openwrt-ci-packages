@@ -34,6 +34,14 @@ UPSTREAM_BRANCH = "master"
 GENERIC_CLASS = "tests.ext.test_package"
 RESULTS_MAX_BYTES = 1_000_000
 SKIP_REASON_MAX = 100
+# Skip reasons listed in the description, per line and suite; the rest is counted.
+SKIP_REASONS_SHOWN = 5
+# Characters the text of a test file may not carry into the description: the
+# markers of markdown (links, mentions through @, tables, code, HTML) and
+# backslash. Whitespace of every kind, newlines included, becomes one space.
+UNSAFE_TEXT = re.compile(r"[@\[\]()<>|`\\]")
+# The target of a QEMU job comes from the name of an artifact.
+TARGET_NAME = r"[A-Za-z0-9._-]+"
 # "<caller job> / <job of the base>", e.g. "image-main / main x86-64-generic".
 JOB_NAME = re.compile(r"^(build|test|image)-(?:main|25-12) / (main|25\.12) (\S+)$")
 
@@ -105,6 +113,18 @@ class TargetResult:
     package: Counts = field(default_factory=Counts)
 
 
+def safe_text(text: str, limit: int = SKIP_REASON_MAX) -> str:
+    """One line of plain text out of text a test produced.
+
+    The tests run code of the package under test, so whatever they write into
+    results.xml is not trusted: it must not open a heading, a mention, a link,
+    an HTML tag or a table cell in the description. The markdown and HTML
+    markers are dropped, whitespace collapses to single spaces (no newline
+    survives) and the length is capped.
+    """
+    return " ".join(UNSAFE_TEXT.sub("", str(text)).split())[:limit].strip()
+
+
 def parse_junit(path: str) -> tuple[Counts, Counts]:
     """Count the test cases of one results.xml: (generic suite, package suite)."""
     if os.path.getsize(path) > RESULTS_MAX_BYTES:
@@ -115,8 +135,8 @@ def parse_junit(path: str) -> tuple[Counts, Counts]:
         tags = {child.tag for child in case}
         if "skipped" in tags:
             counts.skipped += 1
-            message = (case.find("skipped").get("message") or "").strip()
-            reason = f"{case.get('name')}: {message}"[:SKIP_REASON_MAX]
+            message = case.find("skipped").get("message") or ""
+            reason = safe_text(f"{case.get('name')}: {message}")
             if reason not in counts.reasons:
                 counts.reasons.append(reason)
         elif tags & {"failure", "error"}:
@@ -130,7 +150,7 @@ def parse_results(directory: str, package: str) -> list[TargetResult]:
     """Read <directory>/qemu-<package>-<line>-<target>/results.xml (the artifacts
     of the QEMU jobs, as `gh run download` lays them out)."""
     found = []
-    name = re.compile(rf"^qemu-{re.escape(package)}-(main|25\.12)-(.+)$")
+    name = re.compile(rf"^qemu-{re.escape(package)}-(main|25\.12)-({TARGET_NAME})$")
     for path in sorted(glob.glob(os.path.join(directory, "qemu-*", "results.xml"))):
         match = name.match(os.path.basename(os.path.dirname(path)))
         if match is None or match.group(2).endswith("-logs"):
@@ -253,8 +273,15 @@ def overlay_text(args: argparse.Namespace) -> str:
 
 
 def counts_row(counts: Counts) -> str:
-    """The Passed / Skipped / Failed cells of one suite."""
-    return f"{counts.passed} | {counts.skipped} | {counts.failed}"
+    """The Passed / Skipped / Failed cells of one suite (integers only)."""
+    return f"{int(counts.passed)} | {int(counts.skipped)} | {int(counts.failed)}"
+
+
+def reasons_text(reasons: list[str]) -> str:
+    """The skip reasons as code spans (inert), the first few, then how many more."""
+    shown = "; ".join(f"`{r}`" for r in reasons[:SKIP_REASONS_SHOWN])
+    rest = len(reasons) - SKIP_REASONS_SHOWN
+    return f"{shown}; and {rest} more" if rest > 0 else shown
 
 
 def tests_section(
@@ -299,7 +326,7 @@ def tests_section(
             if total.skipped:
                 notes.append(
                     f"**Line `{line}`: {total.skipped} test(s) of the {attr} suite "
-                    f"skipped ({'; '.join(total.reasons)}). A skipped test is not a "
+                    f"skipped ({reasons_text(total.reasons)}). A skipped test is not a "
                     "pass.**"
                 )
             if total.failed:

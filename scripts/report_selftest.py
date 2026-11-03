@@ -12,10 +12,12 @@ Environment variables: none.
 import argparse
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
 from urllib.parse import parse_qs, urlsplit
+from xml.sax.saxutils import quoteattr
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -131,6 +133,38 @@ def every_target(generic: tuple[int, int, int], package: tuple[int, int, int]) -
         for line in report.LINES
         for target in TARGETS
     }
+
+
+# What hostile test code can write into results.xml: line breaks that open a
+# heading, a mention, a link, a tag, a table cell and a code span.
+HOSTILE_NAME = "a\n\n# Injected heading @octocat"
+HOSTILE_MESSAGE = (
+    "needs\n\n[x](http://e.example) @victim <img src=x onerror=y> "
+    "| cell | `code` \\ ![i](http://e.example/i.png)"
+)
+# The only lines of the description that may start a heading.
+HEADINGS = {
+    "## Test suites that ran",
+    "## Results",
+    "### Line `main`: passed",
+    "### Line `25.12`: passed",
+    "## Upstream pull request",
+}
+
+
+def hostile_junit(count: int = 1) -> str:
+    """A results.xml whose skipped cases carry hostile names and messages."""
+    cases = ['<testcase classname="tests.ext.test_package" name="t0"/>']
+    for n in range(count):
+        cases.append(
+            f'<testcase classname="x" name={quoteattr(HOSTILE_NAME + str(n))}>'
+            f"<skipped message={quoteattr(HOSTILE_MESSAGE)}/></testcase>"
+        )
+    return (
+        '<testsuites><testsuite name="pytest">'
+        + "".join(cases)
+        + "</testsuite></testsuites>"
+    )
 
 
 ARTIFACTS = {
@@ -281,10 +315,89 @@ class ReportTest(unittest.TestCase):
             "| `25.12` | package tests (`packages/netbird/tests`) | 13 | 1 | 0 |", body
         )
         self.assertIn(
-            "2 test(s) of the package suite skipped (skip0: NB_SETUP_KEY is not set)",
+            "2 test(s) of the package suite skipped (`skip0: NB_SETUP_KEY is not set`)",
             body,
         )
         self.assertIn("A skipped test is not a pass", body)
+
+    def test_hostile_test_text_is_inert_in_the_body(self) -> None:
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (7, 0, 0))
+            | {("main", "x86-64"): hostile_junit()},
+            package_tests="present",
+        )
+        for text in ("@octocat", "@victim", "[x]", "](", "<img", "onerror=y>", "\\"):
+            self.assertNotIn(text, body)
+        self.assertEqual(
+            {line for line in body.splitlines() if line.startswith("#")}, HEADINGS
+        )
+        note = [line for line in body.splitlines() if "skipped (" in line]
+        self.assertEqual(len(note), 1)
+        self.assertTrue(note[0].endswith("A skipped test is not a pass.**"), note[0])
+        self.assertRegex(note[0], r"skipped \(`a [^`]*`\)")
+
+    def test_hostile_junit_text_is_one_plain_line(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.xml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(hostile_junit())
+            _, package = report.parse_junit(path)
+        self.assertEqual(len(package.reasons), 1)
+        reason = package.reasons[0]
+        self.assertEqual(reason, " ".join(reason.split()))
+        self.assertIn("Injected heading octocat", reason)
+        self.assertRegex(reason, r"^[^@\[\]()<>|`\\\n]+$")
+
+    def test_safe_text_drops_each_marker_and_collapses_whitespace(self) -> None:
+        for char in "@[]()<>|`\\":
+            with self.subTest(char=char):
+                self.assertEqual(report.safe_text(f"a{char}b"), "ab")
+        self.assertEqual(report.safe_text(" a\n\r\n# b\t\tc \u2028d "), "a # b c d")
+
+    def test_safe_text_is_capped(self) -> None:
+        self.assertEqual(len(report.safe_text("x" * 5000)), report.SKIP_REASON_MAX)
+        self.assertEqual(report.safe_text("x" * 50, 10), "x" * 10)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.xml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(hostile_junit().replace("needs", "n" * 5000))
+            _, package = report.parse_junit(path)
+        self.assertLessEqual(len(package.reasons[0]), report.SKIP_REASON_MAX)
+
+    def test_only_the_first_skip_reasons_are_listed(self) -> None:
+        body, _ = self.body(
+            results={("main", "x86-64"): hostile_junit(12)}, package_tests="present"
+        )
+        self.assertIn("; and 7 more)", body)
+        note = next(line for line in body.splitlines() if "skipped (" in line)
+        self.assertEqual(len(re.findall(r"`a [^`]*`", note)), report.SKIP_REASONS_SHOWN)
+
+    def test_counts_are_integers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "results.xml")
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(hostile_junit(3))
+            generic, package = report.parse_junit(path)
+        for counts in (generic, package):
+            for value in (counts.passed, counts.skipped, counts.failed):
+                self.assertIs(type(value), int)
+        self.assertRegex(report.counts_row(package), r"^\d+ \| \d+ \| \d+$")
+        body, _ = self.body(
+            results=every_target((3, 0, 0), (7, 0, 1)), package_tests="present"
+        )
+        for line in body.splitlines():
+            if line.startswith("| `main` | package tests"):
+                self.assertRegex(line, r"\| \d+ \| \d+ \| \d+ \| ")
+
+    def test_a_hostile_artifact_name_is_not_a_target(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            for target in ("x86-64", "x86@octocat", "x86[a](b)", "x86\n# h"):
+                directory = os.path.join(tmp, f"qemu-netbird-main-{target}")
+                os.makedirs(directory)
+                with open(os.path.join(directory, "results.xml"), "w") as handle:
+                    handle.write(junit((1, 0, 0), (1, 0, 0)))
+            found = report.parse_results(tmp, "netbird")
+        self.assertEqual([r.target for r in found], ["x86-64"])
 
     def test_failed_tests_are_counted_and_missing_results_are_said(self) -> None:
         results = every_target((2, 0, 1), (7, 0, 0))
