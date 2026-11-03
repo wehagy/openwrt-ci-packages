@@ -65,8 +65,12 @@ base's `harness/lines.yml` (`packages_branch` of each line, checked out as
   For `netbird` they are the runtime tests described in "NetBird runtime
   tests" below.
 - `.github/workflows/ci.yml`: calls the base for `netbird` on push to
-  `feat/**` and on `workflow_dispatch` (`refresh_sdk`; `lines`: free text, some
-  of the package's lines separated by spaces, empty: all).
+  `feat/**` and on `workflow_dispatch` (`lines`: free text, some of the
+  package's lines separated by spaces, empty: all).
+- `.github/workflows/refresh-images.yml`: the only workflow that writes the
+  SDK and ImageBuilder images of GHCR (see "GHCR images"); daily at 03:43 UTC and
+  by hand (`force`). `scripts/images/refresh-config.sh` derives its lists
+  (lines, test targets, image profiles) from every `packages/*/config.yml`.
 - `.github/workflows/line.yml`: reusable; build, test and images of one package
   on one line (see "Release lines").
 - `.github/workflows/custom-image.yml`: builds one image from a web form (see
@@ -91,7 +95,7 @@ base's `harness/lines.yml` (`packages_branch` of each line, checked out as
 | Job                          | Calls                         | Notes                                              |
 |------------------------------|-------------------------------|----------------------------------------------------|
 | `config`                     | -                             | reads `packages/netbird/config.yml`                |
-| `lines`                      | `line.yml`, one leg per line  | `packages: write`, `fail-fast: false`; `line.yml` calls `build.yml`, `test.yml` (`source: artifact`, `tests_path`, `test_secrets: NB_SETUP_KEY`, `secrets: inherit`) and `images.yml` (`profiles` and `packages` of `config.yml`) |
+| `lines`                      | `line.yml`, one leg per line  | `fail-fast: false`, no `packages: write` (the images of GHCR are only read); `line.yml` calls `build.yml`, `test.yml` (`source: artifact`, `tests_path`, `test_secrets: NB_SETUP_KEY`, `secrets: inherit`) and `images.yml` (`profiles` and `packages` of `config.yml`) |
 | `summary`                    | -                             | one row per line from the `line-result-*` artifacts |
 
 - Each call passes `ci_ref`: the ref of `wehagy/openwrt-ci` the scripts are
@@ -120,7 +124,7 @@ base's `harness/lines.yml` (`packages_branch` of each line, checked out as
 ## Testing an upstream pull request (`upstream-pr.yml`)
 
 Run by hand with `pr_number` (digits only, at most 7, no leading zero; optional
-`refresh_sdk`). It never writes to `openwrt/packages` (a `GET`, a `git fetch`).
+no `refresh_sdk`: the images are only read). It never writes to `openwrt/packages` (a `GET`, a `git fetch`).
 It is `workflow_dispatch` only, never `pull_request_target`.
 
 **No secret reaches an upstream pull request.** Its code is untrusted: the
@@ -199,9 +203,9 @@ in the list: `profile` `other`, `other_profile` `ipq40xx/generic/glinet_gl-b1300
 - The `image` job runs only after a build that succeeded, or when no `package`
   was given (images only). If `source` or `compose` fails, `build` is skipped
   and so is `image`, instead of failing later on a missing artifact.
-- A profile whose architecture has no SDK image yet gets one on first use (the
-  base builds and pushes it; this repository needs write access to the package
-  `ghcr.io/wehagy/openwrt-sdk`, see "SDK image access").
+- A profile whose architecture has no SDK image yet fails the build with the
+  command that refreshes the images; the next `refresh-images.yml` creates it
+  (see "GHCR images"), because the lists come from the same `config.yml`.
 - The summary compares each image with the size limit of the device only when
   `images.limits` of `config.yml` has it (the two 32 MB devices); otherwise it
   says the limit is unknown (the Image Builder prints it only when an image
@@ -451,14 +455,30 @@ and `nbci-vm-<run id>-<rand>`.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
 
-## SDK image access (once, by the owner)
+## GHCR images (once, by the owner)
 
-The base reuses the public SDK image `ghcr.io/wehagy/openwrt-sdk` when it is
-fresh (less than a day old). When it must rebuild it, the push uses this
-repository's `GITHUB_TOKEN`, which needs: GitHub > Packages > `openwrt-sdk` >
+`refresh-images.yml` calls `wehagy/openwrt-ci/.github/workflows/refresh-images.yml@main`
+daily and writes `ghcr.io/wehagy/openwrt-sdk` (one image per line and package
+architecture of the QEMU test targets and image profiles) and
+`ghcr.io/wehagy/openwrt-imagebuilder` (one per line and target of the image
+profiles). An image is rebuilt only when its upstream changed. Builds, QEMU
+tests and image jobs (`ci.yml`, `update.yml`, `upstream-pr.yml`,
+`custom-image.yml`) only read them, anonymously: no job of them has
+`packages: write`, nothing is rebuilt by age. A missing image fails the job with
+the command below; a stale one (older than a day and different from upstream)
+only raises a warning annotation.
+
+Refresh by hand (all images; only those that changed are rebuilt):
+
+    gh workflow run refresh-images.yml --repo wehagy/openwrt-ci-packages
+    gh workflow run refresh-images.yml --repo wehagy/openwrt-ci-packages -f force=true
+
+Access, for each of the two packages: GitHub > Packages > the package >
 Package settings > Manage Actions access > Add Repository >
 `wehagy/openwrt-ci-packages`, role Write (Admin to also delete the superseded
-`-prev` version). Without it the job fails with `push of ... denied`.
+`-prev` version); both packages must be public, since the builds read them
+anonymously. A package created by the first push is private until you change
+its visibility. Without access the job fails with `push of ... denied`.
 
 ## Adding a package
 
