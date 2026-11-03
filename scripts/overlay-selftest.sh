@@ -478,6 +478,17 @@ printf '%s\n' '{"name": "lines (main2) / result", "conclusion": "success"}' '{"n
 decide_two
 check "decide: main2 does not vouch for main" "${work}/dec.out" has "${work}/dec.out" "open=false"
 check "decide: 25.12-1 does not vouch for 25.12" "${work}/dec.log" has "${work}/dec.log" "line 25.12: build=no result"
+# The whole name is matched: a name with a suffix, one with a prefix that has a
+# space, and a nested job are not the job `result` of the leg of main.
+printf '%s\n' '{"name": "lines (main) / result", "conclusion": "success"}' '{"name": "lines (25.12) / result", "conclusion": "success"}' >"${work}/jobs.jsonl"
+decide_two
+check "decide: the plain names vouch for main (control of the forged names)" "${work}/dec.out" has "${work}/dec.out" "open=true"
+for forged in 'lines (main) / result extra' 'a b lines (main) / result' 'lines (main) / test / result'; do
+	jq -c -n --arg name "${forged}" '{name: $name, conclusion: "success"}' >"${work}/jobs.jsonl"
+	decide_two
+	check "decide: the job named '${forged}' does not vouch for main" "${work}/dec.out" has "${work}/dec.out" "open=false"
+	check "decide: ... its file is not believed: '${forged}'" "${work}/dec.log" has "${work}/dec.log" "line main: its result file is not believed: the job result of its leg did not succeed"
+done
 dec_jobs="main:success 25.12:success 26.12:success"
 dec_rc=0
 env PACKAGE=netbird LINES=main REFERENCE=main RESULTS_DIR="${work}/res" REPORT_PASSED=true JOBS_FILE="${work}/none.jsonl" \

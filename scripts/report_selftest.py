@@ -560,6 +560,20 @@ class ReportTest(unittest.TestCase):
         ]
         self.assertFalse(report.result_job_passed(both, "main"))
 
+    def test_the_whole_name_of_the_result_job_is_matched(self) -> None:
+        """A suffix, a prefix with a space and a nested job are not the job."""
+        forged = (
+            "lines (main) / result extra",
+            "a b lines (main) / result",
+            "lines (main) / test / result",
+        )
+        for name in forged:
+            with self.subTest(name=name):
+                records = [{"name": name, "conclusion": "success"}]
+                self.assertFalse(report.result_job_passed(records, "main"))
+        real = [{"name": "lines (main) / result", "conclusion": "success"}]
+        self.assertTrue(report.result_job_passed(real, "main"))
+
     def test_the_secrets_test_job_is_the_test_stage(self) -> None:
         records = [
             {
