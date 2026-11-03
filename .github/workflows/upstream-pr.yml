@@ -1,10 +1,14 @@
 # Tests a pull request of openwrt/packages with the reusable base
 # wehagy/openwrt-ci, by hand: give the PR number. The packages the PR changes
-# are built from refs/pull/<n>/head on the line of the PR's base branch (master:
-# line main, openwrt-25.12: line 25.12), tested in QEMU, and for the packages
-# that have packages/<name>/ here also built into images, and built, tested and
-# imaged on the other line with the changed directories overlaid on that line's
-# branch of openwrt/packages (job `compose`). Read-only towards openwrt/packages.
+# are built from refs/pull/<n>/head on the line of the PR's base branch (the
+# line of the base's harness/lines.yml whose packages_branch is that branch; no
+# line is named here), tested in QEMU, and for the packages that have
+# packages/<name>/ here also built into images, and built, tested and imaged on
+# every other line of their config.yml (`lines:`) with the changed directories
+# overlaid on that line's branch of openwrt/packages (job `compose`). One leg of
+# a matrix per (package, line), in parallel (line.yml); the outcome of each leg
+# is its artifact line-result-<package>-<line>. Read-only towards
+# openwrt/packages.
 #
 # Upstream code is untrusted: its .apk runs in the QEMU VM and its tests run on
 # the runner, so no secret is passed to any build or test (no `secrets:`, no
@@ -42,17 +46,26 @@ jobs:
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       line: ${{ steps.resolve.outputs.line }}
-      other_line: ${{ steps.resolve.outputs.other_line }}
-      other_branch: ${{ steps.resolve.outputs.other_branch }}
+      overlay_lines: ${{ steps.resolve.outputs.overlay_lines }}
+      has_overlay: ${{ steps.resolve.outputs.has_overlay }}
       head_sha: ${{ steps.resolve.outputs.head_sha }}
       matrix_all: ${{ steps.resolve.outputs.matrix_all }}
-      matrix_full: ${{ steps.resolve.outputs.matrix_full }}
-      has_full: ${{ steps.resolve.outputs.has_full }}
+      matrix_legs: ${{ steps.resolve.outputs.matrix_legs }}
       skipped: ${{ steps.resolve.outputs.skipped }}
       overlay_dirs: ${{ steps.resolve.outputs.overlay_dirs }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
+
+      # The lines of the base (harness/lines.yml): the base branch of the PR
+      # is mapped to a line through it.
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
           persist-credentials: false
 
       - name: Self-test the PR logic
@@ -66,10 +79,12 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/upstream-pr/resolve.sh
 
-  # The tree of the other line: its branch plus the changed package directories
-  # of the PR, pushed as a branch of this repository (deleted by `cleanup`).
+  # The tree of each other line: its packages_branch plus the changed package
+  # directories of the PR, pushed as branches of this repository (one per line,
+  # deleted by `cleanup`); in one job because matrix outputs overwrite each
+  # other.
   compose:
-    if: ${{ needs.resolve.outputs.has_full == 'true' }}
+    if: ${{ needs.resolve.outputs.has_overlay == 'true' }}
     needs: resolve
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -79,139 +94,74 @@ jobs:
       run:
         shell: bash
     outputs:
-      branch: ${{ steps.compose.outputs.branch }}
-      sha: ${{ steps.compose.outputs.sha }}
+      overlays: ${{ steps.compose.outputs.overlays }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
           persist-credentials: false
 
       - name: Overlay the changed packages
         id: compose
         env:
           PR_NUMBER: ${{ needs.resolve.outputs.pr_number }}
-          OTHER_BRANCH: ${{ needs.resolve.outputs.other_branch }}
+          OTHER_LINES: ${{ needs.resolve.outputs.overlay_lines }}
           HEAD_SHA: ${{ needs.resolve.outputs.head_sha }}
           OVERLAY_DIRS: ${{ needs.resolve.outputs.overlay_dirs }}
-          TARGET_BRANCH: upstream-overlay/pr${{ needs.resolve.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}
+          TARGET_PREFIX: upstream-overlay/pr${{ needs.resolve.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}
           GH_TOKEN: ${{ github.token }}
-        run: scripts/upstream-pr/compose.sh
+        run: scripts/upstream-pr/compose-lines.sh
 
-  # --- the line of the PR's base branch: the PR tree itself -------------------
-  # feed_ref is the commit SHA that resolve read (the head of the PR), so every
-  # architecture and the summaries name the same tree.
-  # packages: write because build.yml may rebuild the SDK image.
-  build-pr:
-    needs: resolve
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_all) }}
-    permissions:
-      contents: read
-      packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
-    with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.line }}
-      package: ${{ matrix.package }}
-      feed_repository: openwrt/packages
-      feed_ref: ${{ needs.resolve.outputs.head_sha }}
-      refresh_sdk: ${{ inputs.refresh_sdk == true }}
-      profiles: ${{ matrix.profiles }}
-      targets: ${{ matrix.targets }}
-
-  # tests_path: a missing directory means only the generic test runs. No
-  # secrets (see the header).
-  test-pr:
-    needs: [resolve, build-pr]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_all) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
-    with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.line }}
-      package: ${{ matrix.package }}
-      source: artifact
-      tests_path: ${{ matrix.tests_path }}
-      targets: ${{ matrix.targets }}
-      memory: ${{ matrix.memory }}
-      apk_timeout: ${{ matrix.apk_timeout }}
-      services_disabled: ${{ matrix.services_disabled }}
-
-  image-pr:
-    if: ${{ needs.resolve.outputs.has_full == 'true' }}
-    needs: [resolve, build-pr]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
-    with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.line }}
-      package: ${{ matrix.package }}
-      profiles: ${{ matrix.profiles }}
-      packages: ${{ matrix.image_packages }}
-
-  # --- the other line: its branch with the changed directories overlaid -------
-  # Only the packages that have packages/<name>/ here.
-  build-other:
-    if: ${{ needs.resolve.outputs.has_full == 'true' }}
+  # One leg per (package, line), in parallel; each leg is build -> test ->
+  # images (line.yml). kind pr: the line of the PR's base branch, built from
+  # the head of the PR (feed_ref is the commit SHA that resolve read, so every
+  # architecture and the summaries name the same tree), for every changed
+  # package. kind overlay: the other lines of a package with packages/<name>/
+  # here, built from the overlay commit of that line in this repository. No
+  # secrets (see the header: no `secrets:`, no `test_secrets`); a missing tests
+  # directory means only the generic test. packages: write because build.yml
+  # may rebuild the SDK image.
+  lines:
+    if: >-
+      ${{ !cancelled() && needs.resolve.result == 'success'
+      && (needs.compose.result == 'success' || needs.compose.result == 'skipped') }}
     needs: [resolve, compose]
     strategy:
       fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
+      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_legs) }}
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: ./.github/workflows/line.yml
     with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.other_line }}
+      line: ${{ matrix.line }}
       package: ${{ matrix.package }}
-      feed_repository: ${{ github.repository }}
-      feed_ref: ${{ needs.compose.outputs.sha }}
+      feed_repository: ${{ matrix.kind == 'pr' && 'openwrt/packages' || github.repository }}
+      feed_ref: ${{ matrix.kind == 'pr' && needs.resolve.outputs.head_sha || fromJSON(needs.compose.outputs.overlays || '{}')[matrix.line].sha }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
       profiles: ${{ matrix.profiles }}
-      targets: ${{ matrix.targets }}
-
-  test-other:
-    if: ${{ needs.resolve.outputs.has_full == 'true' }}
-    needs: [resolve, build-other]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
-    with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.other_line }}
-      package: ${{ matrix.package }}
-      source: artifact
-      tests_path: ${{ matrix.tests_path }}
+      packages: ${{ matrix.image_packages }}
       targets: ${{ matrix.targets }}
       memory: ${{ matrix.memory }}
       apk_timeout: ${{ matrix.apk_timeout }}
       services_disabled: ${{ matrix.services_disabled }}
+      tests_path: ${{ matrix.tests_path }}
+      with_images: ${{ matrix.with_images }}
 
-  image-other:
-    if: ${{ needs.resolve.outputs.has_full == 'true' }}
-    needs: [resolve, build-other]
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
-    with:
-      ci_ref: main
-      line: ${{ needs.resolve.outputs.other_line }}
-      package: ${{ matrix.package }}
-      profiles: ${{ matrix.profiles }}
-      packages: ${{ matrix.image_packages }}
-
-  # Only build.yml reads the feed (test.yml and images.yml use the artifact), so
-  # the overlay branch can go as soon as the builds of the other line are done.
+  # The base reads the feed only in build.yml, but a leg builds, tests and
+  # images in one go, so the overlay branches go when every leg is done. The
+  # names are fixed (prefix + line), so it also cleans up after a compose that
+  # failed halfway.
   cleanup:
-    if: ${{ always() && needs.compose.outputs.branch != '' }}
-    needs: [compose, build-other]
+    if: ${{ always() && needs.resolve.outputs.has_overlay == 'true' && needs.compose.result != 'skipped' }}
+    needs: [resolve, compose, lines]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -224,30 +174,44 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Delete the overlay branch
+      - name: Delete the overlay branches
         env:
-          BRANCH: ${{ needs.compose.outputs.branch }}
+          OTHER_LINES: ${{ needs.resolve.outputs.overlay_lines }}
+          PREFIX: upstream-overlay/pr${{ needs.resolve.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}
           GH_TOKEN: ${{ github.token }}
-        run: scripts/upstream-pr/cleanup.sh
+        run: |
+          status=0
+          for line in ${OTHER_LINES}; do
+            BRANCH="${PREFIX}-${line}" scripts/upstream-pr/cleanup.sh || status=1
+          done
+          exit "${status}"
 
-  # The result of every job in one table (the run's own graph has them too).
+  # The result of every (package, line) in one table, from the artifact of each
+  # leg (the `needs` of a matrix job is one aggregate of all its legs).
   report:
-    if: ${{ always() }}
-    needs: [resolve, compose, build-pr, test-pr, image-pr, build-other, test-other, image-other, cleanup]
+    if: ${{ always() && needs.resolve.result == 'success' }}
+    needs: [resolve, compose, lines, cleanup]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     defaults:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v8.0.2
+        continue-on-error: true
+        with:
+          pattern: line-result-*
+          path: line-results
+
       - name: Print the results
-        env:
-          NEEDS: ${{ toJSON(needs) }}
         run: |
+          mkdir -p line-results
           {
             echo "### upstream-pr results"
             echo
-            echo "| job | result |"
-            echo "|-----|--------|"
-            jq -r 'to_entries[] | "| \(.key) | \(.value.result) |"' <<<"${NEEDS}"
+            scripts/line-summary.sh line-results
           } | tee -a "${GITHUB_STEP_SUMMARY}"

@@ -8,26 +8,32 @@
 #      two branches to the review repository, base (the starting commit) and
 #      update (the commit), so that a pull request between them shows only the
 #      bump;
-#   2. build, QEMU-test and build images on both lines, through the reusable
-#      base wehagy/openwrt-ci (feed_repository/feed_ref). Line main builds the
-#      update branch as it is. Line 25.12 builds the openwrt-25.12 branch of
+#   2. build, QEMU-test and build images on every line of the package (`lines:`
+#      of its config.yml; no line is named in this file), in parallel, one leg
+#      of a matrix each (line.yml), through the reusable base
+#      wehagy/openwrt-ci (feed_repository/feed_ref). The reference line (the
+#      line of the base whose packages_branch is master) builds the update
+#      branch as it is. Every other line builds its own packages_branch of
 #      openwrt/packages with only the bumped package directory (package_path)
 #      of the update branch laid over it (job compose, the overlay of
 #      upstream-pr.yml), so it checks the bump as a backport and not master's
-#      whole feed against the 25.12 SDK;
-#   3. publish: when line main passed (line 25.12 may fail), open a draft pull
-#      request between the two branches with the results of both lines and the
-#      link that opens the upstream pull request by hand; otherwise delete both
-#      branches. CI never writes to openwrt/packages.
+#      whole feed against that line's SDK;
+#   3. publish: when the reference line passed (the other lines may fail), open
+#      a draft pull request between the two branches with the results of every
+#      line and the link that opens the upstream pull request by hand;
+#      otherwise delete both branches. CI never writes to openwrt/packages.
+#      The result of each line is read from its artifact line-result-<package>-
+#      <line> (scripts/line-result.sh), not from `needs`: the `needs` of a
+#      matrix job is one aggregate of all its legs.
 #
 # Failure paths: a run that pushed its branches and then fails or is cancelled
 # deletes them (prepare and publish, see the cleanup steps). A forced
 # cancellation or a lost runner cannot; the next run's detect job then fails
 # with ::error:: on the orphan branches and says how to remove them. The
-# overlay branch of line 25.12 (upstream-overlay/ in THIS repository) is
-# deleted by the job cleanup on every path once build-25-12 is done; the one
-# a killed run leaves is deleted by the job sweep of a later run, once it is
-# older than a day.
+# overlay branches of the other lines (upstream-overlay/ in THIS repository,
+# one per line) are deleted by the job cleanup on every path once the lines are
+# done; the ones a killed run leaves are deleted by the job sweep of a later
+# run, once older than a day.
 #
 # The secret TEST_UPSTREAM_TOKEN (fine-grained token, only the review
 # repository, Contents and Pull requests: write) is an environment secret of
@@ -66,9 +72,10 @@ concurrency:
 env:
   COMMIT_NAME: Wesley Gimenes
   COMMIT_EMAIL: wehagy@proton.me
-  # The branch of this repository that carries the tree of line 25.12; known
-  # here so that compose and cleanup agree on it even when compose fails.
-  OVERLAY_BRANCH: upstream-overlay/update-${{ github.run_id }}-${{ github.run_attempt }}
+  # The branch of this repository that carries the tree of a line other than the
+  # reference is ${OVERLAY_PREFIX}-<line>; known here so that compose and
+  # cleanup agree on it even when compose fails.
+  OVERLAY_PREFIX: upstream-overlay/update-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   # Reads the one configuration file, validates it, runs the self-tests of the
@@ -98,9 +105,22 @@ jobs:
       apk_timeout: ${{ steps.images.outputs.apk_timeout }}
       services_disabled: ${{ steps.images.outputs.services_disabled }}
       upstream_base: ${{ steps.upstream_base.outputs.upstream_base }}
+      lines: ${{ steps.images.outputs.lines }}
+      reference: ${{ steps.images.outputs.reference }}
+      others: ${{ steps.images.outputs.others }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
+
+      # The lines of the base (harness/lines.yml): the lines of the config are
+      # checked against it.
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
           persist-credentials: false
 
       - name: Self-test the scripts
@@ -292,10 +312,15 @@ jobs:
             echo "no branch was pushed by this run: nothing to delete"
           fi
 
-  # The tree of line 25.12: openwrt-25.12 of openwrt/packages plus the package
-  # directory of the bump commit, pushed as a branch of this repository (the
-  # base builds repository + ref). Same script as upstream-pr.yml. Runs after
-  # prepare because it reads the update branch of the review repository.
+  # The tree of every other line: its packages_branch of openwrt/packages plus
+  # the package directory of the bump commit, pushed as a branch of this
+  # repository (the base builds repository + ref), one per line, in this one
+  # job: the outputs of matrix legs would overwrite each other. Same scripts as
+  # upstream-pr.yml. Runs after prepare because it reads the update branch of
+  # the review repository. A line that cannot be composed is reported and left
+  # out (TOLERATE_FAILURE): it never stops the reference line.
+  # `matrix` is what the job `lines` runs: the reference line on the bump
+  # commit, every composed line on its overlay commit.
   compose:
     needs: [detect, prepare]
     runs-on: ubuntu-26.04
@@ -306,66 +331,79 @@ jobs:
       run:
         shell: bash
     outputs:
-      sha: ${{ steps.compose.outputs.sha }}
-      base_sha: ${{ steps.compose.outputs.base_sha }}
+      matrix: ${{ steps.compose.outputs.matrix }}
+      overlays: ${{ steps.compose.outputs.overlays }}
+      failed: ${{ steps.compose.outputs.failed }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
 
-      - name: Overlay the bumped package on openwrt-25.12
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
+          persist-credentials: false
+
+      - name: Overlay the bumped package on the other lines
         id: compose
         env:
-          OTHER_BRANCH: openwrt-25.12
+          OTHER_LINES: ${{ needs.detect.outputs.others }}
+          REFERENCE_LINE: ${{ needs.detect.outputs.reference }}
+          REFERENCE_FEED_REPOSITORY: ${{ needs.detect.outputs.review_repository }}
+          REFERENCE_FEED_REF: ${{ needs.prepare.outputs.sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.sha }}
           OVERLAY_DIRS: ${{ needs.detect.outputs.package_path }}
           SOURCE_URL: https://github.com/${{ needs.detect.outputs.review_repository }}.git
           SOURCE_REF: refs/heads/${{ needs.detect.outputs.update_branch }}
           SOURCE_LABEL: ${{ needs.detect.outputs.review_repository }}:${{ needs.detect.outputs.update_branch }}
-          TARGET_BRANCH: ${{ env.OVERLAY_BRANCH }}
+          TARGET_PREFIX: ${{ env.OVERLAY_PREFIX }}
+          TOLERATE_FAILURE: "true"
           GH_TOKEN: ${{ github.token }}
-        run: scripts/upstream-pr/compose.sh
+        run: scripts/upstream-pr/compose-lines.sh
 
-  # build.yml pushes the SDK images to GHCR when it has to rebuild them, hence
-  # packages: write (see README.md). Line 25.12 builds the commit of the
-  # overlay branch of this repository; every architecture builds that one tree.
-  build-25-12:
+  # One leg per line (line.yml), all in parallel: build, QEMU test, images. A
+  # failed leg does not stop the others (fail-fast: false), and each leg writes
+  # its own artifact line-result-<package>-<line>. packages: write because
+  # build.yml may rebuild the SDK image (see README.md).
+  # tests_path: a missing directory means only the generic test runs.
+  # `secrets: inherit` passes the repository secrets, not those of an
+  # environment, so TEST_UPSTREAM_TOKEN (environment review) does not reach the
+  # tests; test_secrets names the only secret exported to pytest.
+  lines:
     needs: [detect, compose]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.compose.outputs.matrix) }}
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: ./.github/workflows/line.yml
     with:
-      ci_ref: main
-      line: "25.12"
+      line: ${{ matrix.line }}
       package: ${{ needs.detect.outputs.package }}
-      feed_repository: ${{ github.repository }}
-      feed_ref: ${{ needs.compose.outputs.sha }}
+      feed_repository: ${{ matrix.feed_repository }}
+      feed_ref: ${{ matrix.feed_ref }}
       profiles: ${{ needs.detect.outputs.profiles }}
+      packages: ${{ needs.detect.outputs.packages }}
       targets: ${{ needs.detect.outputs.targets }}
+      memory: ${{ needs.detect.outputs.memory }}
+      apk_timeout: ${{ needs.detect.outputs.apk_timeout }}
+      services_disabled: ${{ needs.detect.outputs.services_disabled }}
+      tests_path: packages/${{ needs.detect.outputs.package }}/tests
+      test_secrets: NB_SETUP_KEY
+    secrets: inherit
 
-  build-main:
-    needs: [detect, prepare]
-    permissions:
-      contents: read
-      packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
-    with:
-      ci_ref: main
-      line: main
-      package: ${{ needs.detect.outputs.package }}
-      feed_repository: ${{ needs.detect.outputs.review_repository }}
-      feed_ref: ${{ needs.prepare.outputs.sha }}
-      profiles: ${{ needs.detect.outputs.profiles }}
-      targets: ${{ needs.detect.outputs.targets }}
-
-  # Only build.yml reads the feed (test.yml and images.yml use the artifact), so
-  # the overlay branch can go as soon as build-25-12 is done. It runs on every
-  # path (success, failure, cancellation) and also when compose failed after
-  # its push; with no branch there it only says so.
+  # Only build.yml reads the feed (test.yml and images.yml use the artifact),
+  # but a leg runs build, test and images in one go, so the overlay branches go
+  # when every leg is done. It runs on every path (success, failure,
+  # cancellation) and also when compose failed after a push; the branch names
+  # are fixed (prefix + line), a line with no branch only says so.
   cleanup:
     if: ${{ always() && needs.compose.result != 'skipped' }}
-    needs: [compose, build-25-12]
+    needs: [detect, compose, lines]
     runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions:
@@ -378,71 +416,21 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Delete the overlay branch
+      - name: Delete the overlay branches
         env:
-          BRANCH: ${{ env.OVERLAY_BRANCH }}
+          OTHER_LINES: ${{ needs.detect.outputs.others }}
           GH_TOKEN: ${{ github.token }}
-        run: scripts/upstream-pr/cleanup.sh
+        run: |
+          status=0
+          for line in ${OTHER_LINES}; do
+            BRANCH="${OVERLAY_PREFIX}-${line}" scripts/upstream-pr/cleanup.sh || status=1
+          done
+          exit "${status}"
 
-  # tests_path: a missing directory means only the generic test runs.
-  # `secrets: inherit` passes the repository secrets, not those of an
-  # environment, so TEST_UPSTREAM_TOKEN (environment review) does not reach the
-  # tests; test_secrets names the only secret exported to pytest.
-  test-25-12:
-    needs: [detect, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
-    with:
-      ci_ref: main
-      line: "25.12"
-      package: ${{ needs.detect.outputs.package }}
-      source: artifact
-      tests_path: packages/${{ needs.detect.outputs.package }}/tests
-      targets: ${{ needs.detect.outputs.targets }}
-      memory: ${{ needs.detect.outputs.memory }}
-      apk_timeout: ${{ needs.detect.outputs.apk_timeout }}
-      services_disabled: ${{ needs.detect.outputs.services_disabled }}
-      test_secrets: NB_SETUP_KEY
-    secrets: inherit
-
-  test-main:
-    needs: [detect, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
-    with:
-      ci_ref: main
-      line: main
-      package: ${{ needs.detect.outputs.package }}
-      source: artifact
-      tests_path: packages/${{ needs.detect.outputs.package }}/tests
-      targets: ${{ needs.detect.outputs.targets }}
-      memory: ${{ needs.detect.outputs.memory }}
-      apk_timeout: ${{ needs.detect.outputs.apk_timeout }}
-      services_disabled: ${{ needs.detect.outputs.services_disabled }}
-      test_secrets: NB_SETUP_KEY
-    secrets: inherit
-
-  image-25-12:
-    needs: [detect, build-25-12]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
-    with:
-      ci_ref: main
-      line: "25.12"
-      package: ${{ needs.detect.outputs.package }}
-      profiles: ${{ needs.detect.outputs.profiles }}
-      packages: ${{ needs.detect.outputs.packages }}
-
-  image-main:
-    needs: [detect, build-main]
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
-    with:
-      ci_ref: main
-      line: main
-      package: ${{ needs.detect.outputs.package }}
-      profiles: ${{ needs.detect.outputs.profiles }}
-      packages: ${{ needs.detect.outputs.packages }}
-
-  # The second job with the token. Line main passed (build, QEMU test and
-  # images all green): open the draft pull request, with line 25.12 reported
-  # whatever its result. Otherwise: delete the two branches, no pull request.
+  # The second job with the token. The reference line passed (build, QEMU test
+  # and images all green, by its own result file and by the job list): open the
+  # draft pull request, with every other line reported whatever its result.
+  # Otherwise: delete the two branches, no pull request.
   # actions: read lets the GITHUB_TOKEN list the jobs and artifacts of this run;
   # the token of the review repository is used only for the final commands.
   publish:
@@ -450,13 +438,8 @@ jobs:
       - detect
       - prepare
       - compose
-      - build-25-12
+      - lines
       - cleanup
-      - build-main
-      - test-25-12
-      - test-main
-      - image-25-12
-      - image-main
     if: ${{ always() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
@@ -503,17 +486,23 @@ jobs:
       # The junit file (results.xml) of every QEMU job is an artifact of this
       # run. The description counts what each suite passed, skipped and failed
       # from them, so a skipped suite is never read as a passed one and a job
-      # without a file is named.
+      # without a file is named. line-results: the outcome of each line, one
+      # artifact per leg of the matrix (line.yml); a line without one is
+      # reported as having no result.
       - name: Download the test results
         env:
           GH_TOKEN: ${{ github.token }}
           PACKAGE: ${{ needs.detect.outputs.package }}
         run: |
-          mkdir results
+          mkdir results line-results
           if ! gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --pattern "qemu-${PACKAGE}-*" --dir results; then
             echo "::warning::no test results could be downloaded: the description says so for every target"
           fi
+          if ! gh run download "${GITHUB_RUN_ID}" --repo "${GITHUB_REPOSITORY}" --pattern "line-result-${PACKAGE}-*" --dir line-results; then
+            echo "::warning::no line result could be downloaded: no line is reported as passed"
+          fi
           find results -name results.xml | sort
+          find line-results -name result.json | sort
 
       - name: Look for the package runtime tests
         id: suites
@@ -534,18 +523,17 @@ jobs:
           REVIEW_IS_FORK: ${{ needs.detect.outputs.review_is_fork }}
           BASE_SHA: ${{ needs.prepare.outputs.base_sha }}
           HEAD_SHA: ${{ needs.prepare.outputs.sha }}
-          FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
-          FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
+          LINES: ${{ needs.detect.outputs.lines }}
+          REFERENCE: ${{ needs.detect.outputs.reference }}
+          OVERLAYS: ${{ needs.compose.outputs.overlays }}
           PACKAGE_PATH: ${{ needs.detect.outputs.package_path }}
-          OVERLAY_BASE_SHA: ${{ needs.compose.outputs.base_sha }}
           UPSTREAM_BASE: ${{ needs.detect.outputs.upstream_base }}
           # The names of the secrets the test jobs pass (their test_secrets).
           TEST_SECRETS: NB_SETUP_KEY
         run: |
           python3 -B scripts/report.py \
-            --feed-sha-main "${FEED_SHA_MAIN}" --feed-sha-25-12 "${FEED_SHA_25_12}" \
+            --lines "${LINES}" --reference "${REFERENCE}" --overlays "${OVERLAYS}" \
             --overlay-repository "${GITHUB_REPOSITORY}" --overlay-dirs "${PACKAGE_PATH}" \
-            --overlay-base-branch openwrt-25.12 --overlay-base-sha "${OVERLAY_BASE_SHA}" \
             --package "${PACKAGE}" --package-tests "${PACKAGE_TESTS}" --old "${OLD_VERSION}" --new "${NEW_VERSION}" \
             --upstream-repository "${UPSTREAM_REPOSITORY}" \
             --review-repository "${REVIEW_REPOSITORY}" --review-is-fork "${REVIEW_IS_FORK}" \
@@ -553,42 +541,27 @@ jobs:
             --base-sha "${BASE_SHA}" --head-sha "${HEAD_SHA}" \
             --run-url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --upstream-base "${UPSTREAM_BASE}" --test-secrets "${TEST_SECRETS}" \
-            --jobs jobs.jsonl --artifacts artifacts.jsonl --results results --out body.md | tee -a "${GITHUB_OUTPUT}"
+            --jobs jobs.jsonl --artifacts artifacts.jsonl --results results --line-results line-results --out body.md | tee -a "${GITHUB_OUTPUT}"
           cat body.md >>"${GITHUB_STEP_SUMMARY}"
 
-      # Both views must agree: the result of the three jobs of line main as
-      # GitHub reports it, and the job list the description was built from. The
-      # commit the base reports having built (feed_sha) must be the bump commit
-      # on line main and the overlay commit on line 25.12 (which does not
-      # decide whether the pull request opens, but is never reported wrong).
+      # Both views must agree: the result file of the reference line (the
+      # artifact of its leg: build, test and images) and the job list the
+      # description was built from. The commit the base reports having built
+      # (feed_sha, in each result file) must be the one this run made for the
+      # line: the bump commit on the reference line, the overlay commit on the
+      # others (which do not decide whether the pull request opens, but are
+      # never reported wrong). No `needs.<job>.result` here: for a matrix it is
+      # one aggregate for all the lines.
       - name: Decide
         id: decide
         env:
-          BUILD: ${{ needs.build-main.result }}
-          TEST: ${{ needs.test-main.result }}
-          IMAGE: ${{ needs.image-main.result }}
-          REPORT_PASSED: ${{ steps.report.outputs.main_passed }}
-          FEED_SHA_MAIN: ${{ needs.build-main.outputs.feed_sha }}
-          HEAD_SHA: ${{ needs.prepare.outputs.sha }}
-          BUILD_25_12: ${{ needs.build-25-12.result }}
-          FEED_SHA_25_12: ${{ needs.build-25-12.outputs.feed_sha }}
-          OVERLAY_SHA: ${{ needs.compose.outputs.sha }}
-        run: |
-          if [ "${BUILD}" = success ] && [ "${FEED_SHA_MAIN}" != "${HEAD_SHA}" ]; then
-            echo "::error::line main built ${FEED_SHA_MAIN}, not the bump commit ${HEAD_SHA}"
-            exit 1
-          fi
-          if [ "${BUILD_25_12}" = success ] && [ "${FEED_SHA_25_12}" != "${OVERLAY_SHA}" ]; then
-            echo "::error::line 25.12 built ${FEED_SHA_25_12}, not the overlay commit ${OVERLAY_SHA}"
-            exit 1
-          fi
-          if [ "${BUILD}" = success ] && [ "${TEST}" = success ] && [ "${IMAGE}" = success ] && [ "${REPORT_PASSED}" = true ]; then
-            open=true
-          else
-            open=false
-          fi
-          echo "line main: build=${BUILD} test=${TEST} image=${IMAGE} report=${REPORT_PASSED} -> open pull request: ${open}"
-          echo "open=${open}" >>"${GITHUB_OUTPUT}"
+          PACKAGE: ${{ needs.detect.outputs.package }}
+          LINES: ${{ needs.detect.outputs.lines }}
+          REFERENCE: ${{ needs.detect.outputs.reference }}
+          RESULTS_DIR: line-results
+          MATRIX: ${{ needs.compose.outputs.matrix }}
+          REPORT_PASSED: ${{ steps.report.outputs.reference_passed }}
+        run: scripts/decide.sh | tee -a "${GITHUB_OUTPUT}"
 
       - name: Open the draft pull request
         id: open_pr
@@ -603,7 +576,7 @@ jobs:
           echo "### Pull request" >>"${GITHUB_STEP_SUMMARY}"
           echo "${url}" >>"${GITHUB_STEP_SUMMARY}"
 
-      # Every way out except an opened pull request ends here: line main did
+      # Every way out except an opened pull request ends here: the reference line did
       # not pass, the description or the decision failed, the pull request
       # could not be opened, the run was cancelled. always() makes it run in all
       # of them; discard-branches.sh itself leaves alone the branches of an open

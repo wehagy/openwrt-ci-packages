@@ -1,0 +1,152 @@
+# Reusable workflow of this repository: build, QEMU-test and build the images of
+# ONE package on ONE release line, through the base wehagy/openwrt-ci. ci.yml,
+# update.yml and upstream-pr.yml call it once per line with a matrix:
+#
+#   strategy.matrix.line: ${{ fromJSON(needs.config.outputs.lines_json) }}
+#
+# Why a workflow of its own and not build/test/image jobs per line in the
+# callers: `needs.<job>.result` of a matrix is ONE aggregate for all its legs
+# and the outputs of the legs overwrite each other, so with a matrix of build
+# jobs a failed build of one line would skip the test of every line and nobody
+# could say which line failed. Here build -> test -> image are ordinary jobs of
+# one leg, and the last job (`result`) turns their results into the artifact
+# line-result-<package>-<line> (scripts/line-result.sh), the per-line outcome
+# that publish, the reports and the decision read.
+#
+# The workflows and the scripts of the base both come from its main (`@main`
+# and ci_ref: main must stay equal; scripts/images/selftest.sh checks it).
+name: line
+
+on:
+  workflow_call:
+    inputs:
+      line:
+        description: Release line, a key of harness/lines.yml of the base
+        type: string
+        required: true
+      package:
+        description: Package name
+        type: string
+        required: true
+      feed_repository:
+        description: Repository of the package tree (empty - openwrt/packages)
+        type: string
+        default: ""
+      feed_ref:
+        description: Ref or commit of feed_repository (empty - the branch of the line)
+        type: string
+        default: ""
+      refresh_sdk:
+        description: Rebuild the SDK image of the line even when fresh
+        type: boolean
+        default: false
+      profiles:
+        description: Image profiles (they also select the architectures to build)
+        type: string
+        default: ""
+      packages:
+        description: Extra packages of the images
+        type: string
+        default: ""
+      targets:
+        description: QEMU test targets (empty - the base default)
+        type: string
+        default: ""
+      memory:
+        description: VM memory of the QEMU tests (empty - the base default)
+        type: string
+        default: ""
+      apk_timeout:
+        description: Timeout of the apk commands of the generic test
+        type: string
+        default: ""
+      services_disabled:
+        description: Init scripts the package leaves disabled
+        type: string
+        default: ""
+      tests_path:
+        description: Directory of the package tests (a missing one - generic test only)
+        type: string
+        default: ""
+      test_secrets:
+        description: Names of the secrets exported to the tests (with secrets inherited)
+        type: string
+        default: ""
+      with_images:
+        description: Build the images of the profiles
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  # packages: write because build.yml may rebuild the SDK image (GHCR).
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    with:
+      ci_ref: main
+      line: ${{ inputs.line }}
+      package: ${{ inputs.package }}
+      feed_repository: ${{ inputs.feed_repository }}
+      feed_ref: ${{ inputs.feed_ref }}
+      refresh_sdk: ${{ inputs.refresh_sdk }}
+      profiles: ${{ inputs.profiles }}
+      targets: ${{ inputs.targets }}
+
+  test:
+    needs: build
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    with:
+      ci_ref: main
+      line: ${{ inputs.line }}
+      package: ${{ inputs.package }}
+      source: artifact
+      tests_path: ${{ inputs.tests_path }}
+      targets: ${{ inputs.targets }}
+      memory: ${{ inputs.memory }}
+      apk_timeout: ${{ inputs.apk_timeout }}
+      services_disabled: ${{ inputs.services_disabled }}
+      test_secrets: ${{ inputs.test_secrets }}
+    secrets: inherit
+
+  image:
+    if: ${{ inputs.with_images }}
+    needs: build
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
+    with:
+      ci_ref: main
+      line: ${{ inputs.line }}
+      package: ${{ inputs.package }}
+      profiles: ${{ inputs.profiles }}
+      packages: ${{ inputs.packages }}
+
+  # The outcome of THIS line, as a file. It runs whatever happened before.
+  result:
+    if: ${{ always() }}
+    needs: [build, test, image]
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Write the result of the line
+        env:
+          LINE: ${{ inputs.line }}
+          PACKAGE: ${{ inputs.package }}
+          BUILD: ${{ needs.build.result }}
+          TEST: ${{ needs.test.result }}
+          IMAGE: ${{ inputs.with_images && needs.image.result || 'not requested' }}
+          FEED_SHA: ${{ needs.build.outputs.feed_sha }}
+        run: scripts/line-result.sh line-result/result.json
+
+      - uses: actions/upload-artifact@v7.0.2
+        with:
+          name: line-result-${{ inputs.package }}-${{ inputs.line }}
+          path: line-result/result.json
+          if-no-files-found: error

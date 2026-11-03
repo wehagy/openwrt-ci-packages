@@ -7,14 +7,18 @@
 # the run summary says what was built from where.
 #
 # Form (see README.md for an example):
-#   line            main or 25.12
+#   line            a line of the package (`lines:` of its config.yml). The
+#                   choices below are the one place that names lines (a GitHub
+#                   form cannot read files); scripts/images/custom.sh refuses a
+#                   line the package does not list, or the base does not have
 #   profile         a configured profile, or `other` with other_profile
 #   other_profile   <target>/<subtarget>/<profile>, used with `other`
 #   packages        extra packages, -name removes one
 #   package         package of this repository to build and include; empty:
 #                   none
 #   pr_number       optional, a pull request of openwrt/packages. If its base
-#                   branch is the one of the line, its head is built as it is;
+#                   branch is the packages_branch of the chosen line (the base's
+#                   harness/lines.yml maps branch to line), its head is built as it is;
 #                   otherwise its changed package directories are overlaid on
 #                   the branch of the line (scripts/upstream-pr/*, the same
 #                   scripts upstream-pr.yml uses)
@@ -35,7 +39,7 @@ on:
   workflow_dispatch:
     inputs:
       line:
-        description: OpenWrt line
+        description: OpenWrt line (a line of the package; add a new line here)
         type: choice
         options: [main, "25.12"]
         default: main
@@ -163,6 +167,15 @@ jobs:
         with:
           persist-credentials: false
 
+      # The lines of the base: the base branch of the PR is mapped to a line.
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
+          persist-credentials: false
+
       - name: Self-test the PR logic
         run: scripts/upstream-pr/selftest.sh
 
@@ -203,6 +216,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
         with:
+          persist-credentials: false
+
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
           persist-credentials: false
 
       - name: Overlay the changed packages
