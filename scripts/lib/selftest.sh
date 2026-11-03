@@ -117,6 +117,22 @@ failed() {
 	[ "$1" -ne 0 ]
 }
 
+# Print how many lines match, 0 included: grep -c exits 1 for "no line matched",
+# which is the answer here, and 2 for a real error, which stops the test.
+#
+# Arguments:
+#   $@  the arguments of grep, without -c (the text comes from the standard
+#       input or from a file named in them)
+count_matches() {
+	cm_rc=0
+	cm_count=$(grep -c "$@") || cm_rc=$?
+	if [ "${cm_rc}" -gt 1 ]; then
+		echo "FAIL count_matches: grep exited ${cm_rc}" >&2
+		exit "${cm_rc}"
+	fi
+	printf '%s\n' "${cm_count}"
+}
+
 # Print the totals and fail if a case failed.
 finish() {
 	printf '%s checks, %s failed\n' "${checks}" "${failures}"

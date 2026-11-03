@@ -220,7 +220,7 @@ eq "compose-lines: nothing failed" "${got}" ""
 run_lines OTHER_LINES=26.12 TARGET_PREFIX=upstream-overlay/update-cl-2-1
 got=$(lines_output matrix '[.include[].line] | join(" ")')
 eq "compose-lines: with 25.12 removed the matrix has no 25.12" "${got}" "main 26.12"
-got=$(git --git-dir="${work}/target.git" for-each-ref --format='%(refname)' | grep -c 'update-cl-2-1-25.12' || :)
+got=$(git --git-dir="${work}/target.git" for-each-ref --format='%(refname)' | count_matches 'update-cl-2-1-25.12')
 eq "compose-lines: with 25.12 removed its branch is not pushed" "${got}" 0
 # A package with only the reference line: no overlay, the matrix is the reference.
 run_lines OTHER_LINES= TARGET_PREFIX=upstream-overlay/update-cl-3-1
@@ -860,7 +860,7 @@ eq "wiring: another line never stops the reference line" "${got}" true
 got=$(wf "${compose_step}.TARGET_PREFIX")
 eq "wiring: compose and cleanup use the same branch prefix" "${got}" "\${{ env.OVERLAY_PREFIX }}"
 cleanup_run=$(wf '.jobs.cleanup.steps[] | select(has("run")).run')
-got=$(printf '%s\n' "${cleanup_run}" | grep -cF "BRANCH=\"\${OVERLAY_PREFIX}-\${line}\"" || :)
+got=$(printf '%s\n' "${cleanup_run}" | count_matches -F "BRANCH=\"\${OVERLAY_PREFIX}-\${line}\"")
 eq "wiring: cleanup deletes the branch of each line under that prefix" "${got}" 1
 got=$(wf '.env.OVERLAY_PREFIX' | cut -c1-17)
 eq "wiring: the overlay branches are under upstream-overlay/" "${got}" upstream-overlay/
@@ -883,7 +883,7 @@ got=$(wf "${decide_env}.REPORT_PASSED")
 eq "wiring: the decision also takes the verdict of the description" "${got}" "\${{ steps.report.outputs.reference_passed }}"
 # The per-line outcome comes from the artifacts of the legs. The aggregate
 # result of a matrix job (and its overwritten outputs) is never a source.
-got=$(grep -c 'needs\.lines\.\(result\|outputs\)' "${workflow}" || :)
+got=$(count_matches 'needs\.lines\.\(result\|outputs\)' "${workflow}")
 eq "wiring: nothing reads the aggregate result or outputs of the matrix job" "${got}" 0
 
 # The same configuration as ci.yml: every input that ci.yml takes from its
@@ -1001,7 +1001,7 @@ got=$(printf '%s\n' "${download_run}" | grep -cF "gh run download \"\${GITHUB_RU
 eq "wiring: publish downloads the QEMU results of this run" "${got}" 1
 got=$(wf '.jobs.publish.steps | to_entries[] | select(.value.name == "Download the test results") | .key')
 report_at=$(wf '.jobs.publish.steps | to_entries[] | select(.value.id == "report") | .key')
-got=$(printf '%s\n' "${download_run}" | grep -cF "gh run download \"\${GITHUB_RUN_ID}\" --repo \"\${GITHUB_REPOSITORY}\" --pattern \"line-result-\${PACKAGE}-*\" --dir line-results" || :)
+got=$(printf '%s\n' "${download_run}" | count_matches -F "gh run download \"\${GITHUB_RUN_ID}\" --repo \"\${GITHUB_REPOSITORY}\" --pattern \"line-result-\${PACKAGE}-*\" --dir line-results")
 eq "wiring: publish downloads the result file of every line of this run" "${got}" 1
 check "wiring: report.py gets the line results" "report" has "${workflow}" "--line-results line-results"
 check "wiring: the results are downloaded before the description" "${got} ${report_at}" test "${got}" -lt "${report_at}"
