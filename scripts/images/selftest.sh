@@ -239,6 +239,17 @@ expect_line "summary: pull request head source" "- source: pull request openwrt/
 	summary SOURCE_MODE=pr OVERLAY=false PR_NUMBER=31059 PR_LINE=main PR_HEAD_SHA=abc
 expect_line "summary: fork source" "- source: feed given by the form (feed_repository, feed_ref)" summary SOURCE_MODE=fork
 expect_line "summary: no package" "- source: nothing was built (no package); the images use the official feed of line 25.12" summary PACKAGE=
+# One artifact only: download-artifact puts its files directly in the path.
+flat=${work}/flat
+mkdir -p "${flat}"
+cp "${art}"/images-netbird-25.12-glinet-gl-mt1300/* "${flat}/"
+run env LINE=25.12 PROFILE=x LIMIT=33226752 IMAGE_RESULT=success "${sm}" "${flat}"
+if [ "${rc}" -eq 0 ] && grep -qxF '| openwrt-sysupgrade.bin | 30000000 | 90.29 % of 33226752 bytes, margin 3226752 bytes |' "${work}/out" &&
+	grep -qxF 'netbird - 0.78.1-r1' "${work}/out" && ! grep -q 'no image artifact' "${work}/out"; then
+	report "summary: a single artifact downloaded without a subdirectory" ok
+else
+	report "summary: a single artifact downloaded without a subdirectory" "rc ${rc}: ${out_text}"
+fi
 run env LINE=25.12 PROFILE=x IMAGE_RESULT=failure "${sm}" "${work}/missing"
 if [ "${rc}" -eq 0 ] && grep -q 'no image artifact' "${work}/out"; then
 	report "summary: no artifact" ok

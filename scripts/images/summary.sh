@@ -78,36 +78,57 @@ fi
 # ---------------------------------------------------------------------------
 # Images.
 # ---------------------------------------------------------------------------
+# Print the image files of one artifact directory with their size against the
+# limit, and the manifest.
+#
+# Arguments:
+#   $1  directory
+#   $2  title
+report_dir() {
+	printf '\n#### %s\n\n' "$2"
+	printf '| image file | bytes | vs device limit |\n|---|---|---|\n'
+	for file in "$1"/*; do
+		[ -f "${file}" ] || continue
+		case "${file}" in
+		*.manifest | */sha256sums) continue ;;
+		*) ;;
+		esac
+		bytes=$(wc -c <"${file}") || exit 1
+		if [ -n "${limit}" ]; then
+			cmp=$(awk -v b="${bytes}" -v l="${limit}" 'BEGIN { printf "%.2f %% of %d bytes, %s %d bytes", 100 * b / l, l, (b <= l ? "margin" : "OVER by"), (b <= l ? l - b : b - l) }') || exit 1
+		else
+			cmp="limit unknown (the Image Builder prints it only when the image does not fit)"
+		fi
+		printf '| %s | %s | %s |\n' "$(basename "${file}")" "${bytes}" "${cmp}"
+	done
+	for manifest in "$1"/*.manifest; do
+		[ -f "${manifest}" ] || continue
+		count=$(wc -l <"${manifest}") || exit 1
+		printf '\ninstalled packages (%s, %s):\n\n' "$(basename "${manifest}")" "${count}"
+		printf '```\n'
+		cat "${manifest}"
+		printf '```\n'
+	done
+}
+
+# actions/download-artifact with a pattern puts each artifact in a directory
+# named after it when several match, and the files directly in the path when
+# only one does; both layouts are read.
 found=0
 if [ -d "${dir}" ]; then
 	for art in "${dir}"/images-*; do
 		[ -d "${art}" ] || continue
 		found=1
-		printf '\n#### %s\n\n' "$(basename "${art}")"
-		printf '| image file | bytes | vs device limit |\n|---|---|---|\n'
-		for file in "${art}"/*; do
-			[ -f "${file}" ] || continue
-			case "${file}" in
-			*.manifest | */sha256sums) continue ;;
-			*) ;;
-			esac
-			bytes=$(wc -c <"${file}") || exit 1
-			if [ -n "${limit}" ]; then
-				cmp=$(awk -v b="${bytes}" -v l="${limit}" 'BEGIN { printf "%.2f %% of %d bytes, %s %d bytes", 100 * b / l, l, (b <= l ? "margin" : "OVER by"), (b <= l ? l - b : b - l) }') || exit 1
-			else
-				cmp="limit unknown (the Image Builder prints it only when the image does not fit)"
-			fi
-			printf '| %s | %s | %s |\n' "$(basename "${file}")" "${bytes}" "${cmp}"
-		done
-		for manifest in "${art}"/*.manifest; do
-			[ -f "${manifest}" ] || continue
-			count=$(wc -l <"${manifest}") || exit 1
-			printf '\ninstalled packages (%s, %s):\n\n' "$(basename "${manifest}")" "${count}"
-			printf '```\n'
-			cat "${manifest}"
-			printf '```\n'
-		done
+		report_dir "${art}" "$(basename "${art}")"
 	done
+	if [ "${found}" -eq 0 ]; then
+		for manifest in "${dir}"/*.manifest; do
+			[ -f "${manifest}" ] || continue
+			found=1
+			report_dir "${dir}" "image files (one artifact)"
+			break
+		done
+	fi
 fi
 if [ "${found}" -eq 0 ]; then
 	printf '\nno image artifact: the image job did not produce one (see its summary; an image that does not fit the flash has none)\n'
