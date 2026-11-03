@@ -148,15 +148,22 @@ and `nbci-vm-<run id>-<rand>`.
   `term_timeout` 60 (both lines, all targets). The package under test is not
   changed. Why: the init script of `net/netbird` in `openwrt/packages` has no
   `term_timeout`, so procd sends SIGKILL 5 s after SIGTERM, and the daemon
-  needs longer on the emulated CPUs of this CI (it closes up to about 70
-  peers, which the shared setup key and the parallel jobs create). A SIGKILLed
-  daemon leaves the nftables table `netbird` and `wt0` behind, so the stop test
+  can need longer on the emulated CPUs of this CI. The time grows with the
+  number of peers it closes (the shared setup key and the parallel jobs create
+  them), but the peer count alone does not explain the tail: 17.71 s was seen
+  (main, malta-be, netbird 0.82.0) with at most 14 peers in the last status
+  before the stop. A SIGKILLed daemon leaves the nftables table `netbird` and `wt0` behind, so the stop test
   failed. Measured on the `25.12` line (netbird 0.78.1, `source: feed`, 10
   runs per arm, 30 emulated jobs per arm): as shipped, the stop test failed in
   7/30 jobs (10 procd SIGKILLs; malta-le 4/10, malta-be 3/10, armsr-armv8
   0/10; x86-64 0/10); with `term_timeout 60`, 0/30 failures and 0 SIGKILLs;
-  longest shutdown 24.29 s (malta-be), 12/30 emulated jobs above 5 s (Fisher
-  exact, one-sided, p = 0.0053). Runs, control: 41504158032 41504375411
+  longest shutdown 24.29 s (malta-be; the measurement clock polled with about
+  1 s resolution, see below), 12/30 emulated jobs above 5 s (Fisher
+  exact, one-sided, p = 0.0053). The measurement is of netbird 0.78.1; CI
+  now tests the package versions of the lines (25.12: netbird 0.81.4 from the
+  artifact build, `source: artifact`; main: 0.82.0), where the durations seen
+  so far are shorter (1.6-4.6 s in two full runs, one 17.71 s case).
+  Runs, control: 41504158032 41504375411
   41505527205 41505553458 41508031201 41508055262 41509219773 41509245108
   41510385303 41510407795; treatment: 41504161072 41504379764 41505539968
   41505567017 41508043876 41508067173 41509232863 41509257304 41510396567
@@ -171,8 +178,16 @@ and `nbci-vm-<run id>-<rand>`.
   (section `netbird stop`) and to the junit properties
   `netbird_stop_duration_s`, `netbird_stop_sigkill` and
   `netbird_term_timeout_s`. A duration above 5 s adds a warning to the summary
-  and the junit property `netbird_stop_warning`: the package as shipped (procd
-  default `term_timeout` 5 s) would have sent SIGKILL.
+  and the junit property `netbird_stop_warning`, and prints a GitHub
+  annotation `::warning title=netbird stop slower than 5 s::...` in the step
+  log of the job (the job stays green): the package as shipped (procd default
+  `term_timeout` 5 s) would have sent SIGKILL. Poll resolution: the earlier
+  measurement (the runs above) polled with `sleep 0.1 || sleep 1`; BusyBox
+  `sleep` rejects `0.1` (`sleep: invalid number '0.1'`), so it polled every 1 s
+  and its durations are overestimated by 0-1 s. The poll now sleeps with
+  `usleep 100000` when the image has it, otherwise it spins on `/proc/uptime`
+  (10 ms); the log line `netbird stop measured` shows `poll`. Before the stop
+  the test asks procd again for `term_timeout` and fails if it is not 60.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
 
