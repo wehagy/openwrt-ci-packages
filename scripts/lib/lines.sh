@@ -25,6 +25,8 @@
 REFERENCE_BRANCH=master
 # Where the workflows check the base out.
 LINES_DEFAULT_FILE=ci-base/harness/lines.yml
+# The file every function reads.
+: "${BASE_LINES_FILE:=${LINES_DEFAULT_FILE}}"
 
 # Print an error message to stderr and return 1. The value that was rejected is
 # never echoed unless it passed the name checks (a newline or "::" could forge
@@ -40,7 +42,7 @@ lines_error() {
 # Fail unless the base's lines.yml is readable and has a `lines` table. Run
 # once per script.
 lines_check_file() {
-	lc_file=${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}
+	lc_file=${BASE_LINES_FILE}
 	if [ ! -f "${lc_file}" ]; then
 		lines_error "the base's lines.yml is not at ${lc_file}: check the base out (wehagy/openwrt-ci) or set BASE_LINES_FILE"
 		return 1
@@ -72,13 +74,22 @@ check_line_name() {
 	fi
 }
 
+# Print the lines of the base whose packages_branch is the argument, one per
+# line of output.
+#
+# Arguments:
+#   $1  branch
+lines_on_branch() {
+	B=$1 yq -r '.lines | to_entries | map(select(.value.packages_branch == strenv(B))) | .[].key' "${BASE_LINES_FILE}"
+}
+
 # Print the packages_branch of a line, "" when the base has no such line. The
 # name must already have passed check_line_name.
 #
 # Arguments:
 #   $1  line name
 line_branch() {
-	BL_LINE=$1 yq -r '.lines[strenv(BL_LINE)].packages_branch // ""' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}"
+	BL_LINE=$1 yq -r '.lines[strenv(BL_LINE)].packages_branch // ""' "${BASE_LINES_FILE}"
 }
 
 # Print the packages_branch of a line; fail when the base has no such line.
@@ -89,7 +100,7 @@ branch_for_line() {
 	check_line_name "$1"
 	bl_branch=$(line_branch "$1")
 	if [ -z "${bl_branch}" ]; then
-		bl_known=$(yq -r '.lines | keys | join(" ")' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}")
+		bl_known=$(yq -r '.lines | keys | join(" ")' "${BASE_LINES_FILE}")
 		lines_error "the base has no line '$1' (lines of the base: ${bl_known})"
 		return 1
 	fi
@@ -98,7 +109,7 @@ branch_for_line() {
 
 # Print the reference line: the single line whose packages_branch is master.
 reference_line() {
-	rl_found=$(B=${REFERENCE_BRANCH} yq -r '.lines | to_entries | map(select(.value.packages_branch == strenv(B))) | .[].key' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}")
+	rl_found=$(lines_on_branch "${REFERENCE_BRANCH}")
 	case "${rl_found}" in
 	'')
 		lines_error "no line of the base has packages_branch ${REFERENCE_BRANCH}: there is no reference line"
@@ -126,10 +137,10 @@ line_for_branch() {
 		;;
 	*) ;;
 	esac
-	lf_found=$(B=$1 yq -r '.lines | to_entries | map(select(.value.packages_branch == strenv(B))) | .[].key' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}")
+	lf_found=$(lines_on_branch "$1")
 	case "${lf_found}" in
 	'')
-		lf_known=$(yq -r '.lines | to_entries | map(.key + "=" + .value.packages_branch) | join(" ")' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}")
+		lf_known=$(yq -r '.lines | to_entries | map(.key + "=" + .value.packages_branch) | join(" ")' "${BASE_LINES_FILE}")
 		lines_error "unsupported base branch '$1': no line of the base builds it (branch of each line: ${lf_known})"
 		return 1
 		;;
@@ -152,12 +163,19 @@ check_package_lines() {
 	cpl_ref=$(reference_line)
 	cpl_have_ref=false
 	cpl_seen=" "
-	cpl_known=$(yq -r '.lines | keys | join(" ")' "${BASE_LINES_FILE:-${LINES_DEFAULT_FILE}}")
+	cpl_known=$(yq -r '.lines | keys | join(" ")' "${BASE_LINES_FILE}")
 	if [ -z "$1" ]; then
 		lines_error "$2 is empty: list at least the reference line ${cpl_ref}"
 		return 1
 	fi
-	for cpl_line in $1; do
+	# Split by hand: `for x in $1` would expand a glob character of a name.
+	cpl_rest=$1
+	while [ -n "${cpl_rest}" ]; do
+		cpl_line=${cpl_rest%% *}
+		case "${cpl_rest}" in
+		*" "*) cpl_rest=${cpl_rest#* } ;;
+		*) cpl_rest= ;;
+		esac
 		check_line_name "${cpl_line}"
 		case "${cpl_seen}" in
 		*" ${cpl_line} "*)

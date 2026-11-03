@@ -217,6 +217,22 @@ mkpkg noref 'lines: ["25.12", "26.12"]'
 expect_refused "lines: the reference line is required" "does not list the reference line main" "${cfg}" noref
 mkpkg number 'lines: [main, 26.10]'
 expect_refused "lines: an unquoted number is refused" "must be a quoted string" "${cfg}" number
+mkpkg spaced 'lines: [main, "26.10 26.1"]'
+expect_refused "lines: one name with a space is not two lines" "invalid line name" "${cfg}" spaced
+mkpkg glob 'lines: [main, "*"]'
+expect_refused "lines: a glob character is not a line" "invalid line name" "${cfg}" glob
+mkpkg multi 'lines: [main, "25.12\n26.12"]'
+expect_refused "lines: a name with a newline is refused" "invalid line name" "${cfg}" multi
+mkpkg blank 'lines: [main, ""]'
+expect_refused "lines: an empty name is refused" "invalid line name" "${cfg}" blank
+mkpkg lead 'lines: [main, " 25.12"]'
+expect_refused "lines: a name with a leading space is refused" "invalid line name" "${cfg}" lead
+# check_package_lines of lib/lines.sh on a list with a glob character, in a
+# shell where globbing is on (config.sh turns it off): the word is no line, and
+# it does not expand into the files of the directory.
+expect_refused "lines.sh: a glob in a list is no line, with globbing on" "invalid line name" sh -ec ". \"${root}/scripts/lib/lines.sh\"; check_package_lines 'main *' list"
+expect_refused "lines: SELECT_LINES with a glob is no line" "invalid line name" env 'SELECT_LINES=*' "${cfg}" two
+expect_refused "lines: SELECT_LINES with a forged name" "invalid line name" env 'SELECT_LINES=main;id' "${cfg}" two
 mkpkg forged 'lines: [main, "25.12;id"]'
 expect_refused "lines: a forged name is refused" "invalid line name" "${cfg}" forged
 expect_refused "lines: no base lines.yml" "lines.yml is not at" env BASE_LINES_FILE="${work}/missing.yml" "${cfg}" two
@@ -465,23 +481,33 @@ image_case "does not run when config failed (build success)" skip failure netbir
 #
 # Arguments: the files.
 named_lines() {
-	grep -nE '25[.-]12|2[6-9][.-][0-9]+|openwrt-2[0-9]|(^|[^A-Za-z0-9_./-])line: *"?(main|[0-9])|\"main\"|== *.main.' "$@" | grep -v 'options: \[main, "25.12"\]' | grep -v 'ubuntu-26.04' || :
+	awk '
+		BEGIN {
+			pat = "25[.-]12|2[6-9][.-][0-9]+|openwrt-2[0-9]|(^|[^A-Za-z0-9_./-])line: *\"?(main|[0-9])|\"main\"|== *.main."
+		}
+		$0 ~ pat && index($0, "options: [main, \"25.12\"]") == 0 && index($0, "ubuntu-26.04") == 0 {
+			print FILENAME ":" FNR ":" $0
+		}' "$@"
 }
-workflow_files=$(find "${root}/.github/workflows" -name '*.yml' | sort)
-# shellcheck disable=SC2086
-got=$(named_lines ${workflow_files})
+got=$(find "${root}/.github/workflows" -name '*.yml' | sort | while IFS= read -r file; do named_lines "${file}"; done)
 if [ -z "${got}" ]; then
 	report "no line is named in the workflows (but the form choices)" ok
 else
 	report "no line is named in the workflows (but the form choices)" "${got}"
 fi
-script_files=$(find "${root}/scripts" -type f \( -name '*.sh' -o -name '*.py' \) ! -name '*selftest*' ! -path '*/stubs/*' | sort)
-# shellcheck disable=SC2086
-got=$(named_lines ${script_files})
+got=$(find "${root}/scripts" -type f \( -name '*.sh' -o -name '*.py' \) ! -name '*selftest*' ! -path '*/stubs/*' | sort | while IFS= read -r file; do named_lines "${file}"; done)
 if [ -z "${got}" ]; then
 	report "no line is named in the scripts or in report.py" ok
 else
 	report "no line is named in the scripts or in report.py" "${got}"
+fi
+# The guard sees a line when one is named (a mutant that hides them all fails).
+printf 'run: echo 25.12\nok: nothing\n' >"${work}/named.txt"
+got=$(named_lines "${work}/named.txt")
+if [ "${got}" = "${work}/named.txt:1:run: echo 25.12" ]; then
+	report "the guard for named lines sees a named line" ok
+else
+	report "the guard for named lines sees a named line" "got: ${got}"
 fi
 # The form choices are lines of the base, and the only place that lists them.
 choices=$(yq -r '.on.workflow_dispatch.inputs.line.options[]' "${root}/.github/workflows/custom-image.yml" | tr '\n' ' ')
@@ -502,7 +528,7 @@ for f in ci update upstream-pr; do
 	else
 		report "workflow: ${f}.yml runs its lines through line.yml" "uses: ${uses}"
 	fi
-	direct=$(grep -c 'wehagy/openwrt-ci/\.github/workflows/' "${file}" || :)
+	direct=$(awk '/wehagy\/openwrt-ci\/\.github\/workflows\//{n++} END{print n+0}' "${file}")
 	if [ "${direct}" -eq 0 ]; then
 		report "workflow: ${f}.yml calls the base only through line.yml" ok
 	else

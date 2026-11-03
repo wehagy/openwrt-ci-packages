@@ -32,7 +32,8 @@
 #   SELECT_LINES   optional, lines of the package to keep, separated by spaces;
 #                  a line the package does not list is an error
 
-set -eu
+# -f: no word of a list (SELECT_LINES, the lines of the config) is a glob.
+set -efu
 
 script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source=scripts/lib/lines.sh
@@ -74,12 +75,22 @@ lines_tag=$(value '.lines | tag')
 lines_bad=$(value '[.lines[] | select(tag != "!!str")] | length')
 [ "${lines_bad}" = 0 ] ||
 	die "${config}: every line must be a quoted string, e.g. \"<line>\" (an unquoted number is read as a decimal and loses a trailing zero)"
+# Every element is ONE line name: a string with a space in it is
+# not two lines, and a glob character is not a name.
+lines_count=$(value '.lines | length')
+lines_at=0
+while [ "${lines_at}" -lt "${lines_count}" ]; do
+	lines_name=$(value ".lines[${lines_at}]")
+	check_line_name "${lines_name}"
+	lines_at=$((lines_at + 1))
+done
 package_lines=$(value '.lines | join(" ")')
 check_package_lines "${package_lines}" "${config}: lines"
 reference=$(reference_line)
 selected=
 if [ -n "${SELECT_LINES:-}" ]; then
 	for want in ${SELECT_LINES}; do
+		check_line_name "${want}"
 		case " ${package_lines} " in
 		*" ${want} "*) ;;
 		*) die "line ${want} is not a line of ${package} (its lines: ${package_lines})" ;;

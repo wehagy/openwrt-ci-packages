@@ -26,13 +26,17 @@ script_dir=$(cd "$(dirname "$0")" && pwd)
 # shellcheck source-path=SCRIPTDIR
 # shellcheck source=lib/common.sh
 . "${script_dir}/lib/common.sh"
+# shellcheck source-path=SCRIPTDIR
+# shellcheck source=lib/lines.sh
+. "${script_dir}/lib/lines.sh"
 
 : "${REVIEW_REPOSITORY:?}" "${REVIEW_BRANCH:?}" "${REVIEW_IS_FORK:?}"
 check_review_repository "${REVIEW_REPOSITORY}"
 check_branch "${REVIEW_BRANCH}"
 
 upstream=openwrt/packages
-upstream_branch=master
+# The branch the upstream pull request targets: the one the reference line builds.
+upstream_branch=${REFERENCE_BRANCH}
 
 case "${REVIEW_IS_FORK}" in
 false)

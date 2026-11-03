@@ -17,8 +17,10 @@ base's `harness/lines.yml` (`packages_branch` of each line, checked out as
 
 - **Adding a line** (for example `"26.12"`): add it to `harness/lines.yml` and
   `harness/targets.yml` of the base, add it to the `lines:` list of the package
-  and to the `line` choices of `custom-image.yml`. Nothing else changes: the next
-  run runs the new line in parallel with the others.
+  and to the `line` choices of `custom-image.yml` (quoted there too: `"26.10"`).
+  A line name is `[0-9A-Za-z._-]`, one name per list element. Nothing else
+  changes: the next run runs the new line in parallel with the others. The
+  `lines` input of `ci.yml` accepts only lines the package lists.
 - **Removing a line**: delete it from the `lines:` list of the package.
 - **The reference line** is the line of the base whose `packages_branch` is
   `master` (`main`). Every package must list it: the bump commit of `update.yml`
@@ -44,7 +46,8 @@ base's `harness/lines.yml` (`packages_branch` of each line, checked out as
   base's file with a fake third line (`26.12`), and prove three lines, one line
   failing while the others pass, and the removal of `25.12`
   (`scripts/images/selftest.sh`, `scripts/upstream-pr/selftest.sh`,
-  `scripts/overlay-selftest.sh`, `scripts/report_selftest.py`).
+  `scripts/overlay-selftest.sh`, `scripts/workflow-selftest.sh`,
+  `scripts/report_selftest.py`).
 
 ## Layout
 
@@ -329,6 +332,19 @@ never writes to `openwrt/packages`; you open the upstream pull request by hand.
 variables of `pytest`, and no process above `pytest` keeps the JSON with all
 the secrets of this repository in its environment. Values are never printed; a
 missing secret is an empty variable, so a test can skip with a reason.
+
+`line.yml` inherits secrets only when asked: its job `test` (no secrets) runs
+when the caller gives no `test_secrets`, and its job `test_secrets` (the only one
+with `secrets: inherit`) runs only when it does. `upstream-pr.yml` passes
+neither `secrets:` nor `test_secrets`, so the code of a pull request never meets
+a secret, even if a `secrets: inherit` is added there by mistake;
+`scripts/workflow-selftest.sh` pins this, and that `ci.yml` and `update.yml`
+pass `test_secrets: NB_SETUP_KEY`.
+
+A result file (`line-result-<package>-<line>`) is believed only when the job
+`result` of its leg succeeded in the job list and its content is well formed
+(known job results, `feed_sha` a full SHA or empty); `passed` is recomputed from
+the three results by `scripts/decide.sh` and `scripts/report.py`.
 
 This is hygiene, not isolation: the tests in `tests_path` are code of this
 repository, and so is the workflow that passes the secrets; a test could read
