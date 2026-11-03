@@ -89,6 +89,12 @@ jobs:
       update_branch: ${{ steps.plan.outputs.update_branch }}
       base_branch: ${{ steps.plan.outputs.base_branch }}
       review_is_fork: ${{ steps.fork.outputs.review_is_fork }}
+      profiles: ${{ steps.images.outputs.profiles }}
+      packages: ${{ steps.images.outputs.packages }}
+      targets: ${{ steps.images.outputs.targets }}
+      memory: ${{ steps.images.outputs.memory }}
+      apk_timeout: ${{ steps.images.outputs.apk_timeout }}
+      services_disabled: ${{ steps.images.outputs.services_disabled }}
     steps:
       - uses: actions/checkout@v7.0.1
         with:
@@ -96,6 +102,7 @@ jobs:
 
       - name: Self-test the scripts
         run: |
+          scripts/images/selftest.sh
           scripts/update-selftest.sh
           python3 -B scripts/report_selftest.py
 
@@ -103,6 +110,13 @@ jobs:
       - name: Read and validate packages/netbird/config.yml
         id: config
         run: scripts/check-config.sh packages/netbird/config.yml | tee -a "${GITHUB_OUTPUT}"
+
+      # What is built, tested and imaged: the same reader and the same file as
+      # ci.yml, so a bump is checked on the images and with the VM settings
+      # that ci.yml uses.
+      - name: Read the image and test settings of packages/netbird/config.yml
+        id: images
+        run: scripts/images/config.sh netbird | tee -a "${GITHUB_OUTPUT}"
 
       - name: Plan the update
         id: plan
@@ -286,6 +300,8 @@ jobs:
       package: ${{ needs.detect.outputs.package }}
       feed_repository: ${{ github.repository }}
       feed_ref: ${{ needs.compose.outputs.sha }}
+      profiles: ${{ needs.detect.outputs.profiles }}
+      targets: ${{ needs.detect.outputs.targets }}
 
   build-main:
     needs: [detect, prepare]
@@ -299,6 +315,8 @@ jobs:
       package: ${{ needs.detect.outputs.package }}
       feed_repository: ${{ needs.detect.outputs.review_repository }}
       feed_ref: ${{ needs.prepare.outputs.sha }}
+      profiles: ${{ needs.detect.outputs.profiles }}
+      targets: ${{ needs.detect.outputs.targets }}
 
   # Only build.yml reads the feed (test.yml and images.yml use the artifact), so
   # the overlay branch can go as soon as build-25-12 is done. It runs on every
@@ -338,6 +356,10 @@ jobs:
       package: ${{ needs.detect.outputs.package }}
       source: artifact
       tests_path: packages/${{ needs.detect.outputs.package }}/tests
+      targets: ${{ needs.detect.outputs.targets }}
+      memory: ${{ needs.detect.outputs.memory }}
+      apk_timeout: ${{ needs.detect.outputs.apk_timeout }}
+      services_disabled: ${{ needs.detect.outputs.services_disabled }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 
@@ -350,6 +372,10 @@ jobs:
       package: ${{ needs.detect.outputs.package }}
       source: artifact
       tests_path: packages/${{ needs.detect.outputs.package }}/tests
+      targets: ${{ needs.detect.outputs.targets }}
+      memory: ${{ needs.detect.outputs.memory }}
+      apk_timeout: ${{ needs.detect.outputs.apk_timeout }}
+      services_disabled: ${{ needs.detect.outputs.services_disabled }}
       test_secrets: NB_SETUP_KEY
     secrets: inherit
 
@@ -360,6 +386,8 @@ jobs:
       ci_ref: main
       line: "25.12"
       package: ${{ needs.detect.outputs.package }}
+      profiles: ${{ needs.detect.outputs.profiles }}
+      packages: ${{ needs.detect.outputs.packages }}
 
   image-main:
     needs: [detect, build-main]
@@ -368,6 +396,8 @@ jobs:
       ci_ref: main
       line: main
       package: ${{ needs.detect.outputs.package }}
+      profiles: ${{ needs.detect.outputs.profiles }}
+      packages: ${{ needs.detect.outputs.packages }}
 
   # The second job with the token. Line main passed (build, QEMU test and
   # images all green): open the draft pull request, with line 25.12 reported

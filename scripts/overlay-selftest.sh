@@ -183,15 +183,17 @@ got=$(git --git-dir="${work}/target.git" log -1 --format=%s "${pr_sha}" | cut -d
 eq "compose: a pull request overlay: message" "${got}" "overlay of net/netbird from openwrt/packages#5"
 
 # --- cleanup.sh -------------------------------------------------------------
-# gh shim: the DELETE of a ref removes it from target.git; GH_SHIM_FAIL makes it
-# fail. Every call is logged.
+# gh shim: the DELETE of a ref removes it from target.git and fails, as the API
+# does, when the ref does not exist; GH_SHIM_FAIL makes it fail. Every call is
+# logged.
 mkdir "${work}/bin"
 cat >"${work}/bin/gh" <<SHIM
 #!/usr/bin/env sh
 echo "gh \$*" >>"${work}/gh.log"
 [ -z "\${GH_SHIM_FAIL:-}" ] || exit 1
-ref=\${4#repos/*/*/git/refs/}
-git --git-dir="${work}/target.git" update-ref -d "refs/\${ref#refs/}"
+ref=refs/\${4#repos/*/*/git/refs/}
+git --git-dir="${work}/target.git" rev-parse -q --verify "\${ref}" >/dev/null || exit 1
+git --git-dir="${work}/target.git" update-ref -d "\${ref}"
 SHIM
 chmod +x "${work}/bin/gh"
 
@@ -234,7 +236,8 @@ eq "cleanup: the overlay of another run stays" "${got}" there
 run_cleanup
 check "cleanup: a branch that does not exist: exits 0" "${work}/cln.err" same "${cln_rc}" 0
 check "cleanup: a branch that does not exist: says so" "${work}/cln.out" has "${work}/cln.out" "does not exist"
-check "cleanup: a branch that does not exist: no delete is made" "${work}/gh.log" empty "${work}/gh.log"
+got=$(target_state main)
+eq "cleanup: a branch that does not exist: the others stay" "${got}" there
 
 for refused in main feat/update-pr upstream-overlay/ upstream-overlay/../main "upstream-overlay/x;id"; do
 	run_cleanup BRANCH="${refused}"
@@ -247,7 +250,9 @@ got=$(target_state main)
 eq "cleanup: refused branches are still there" "${got}" there
 
 run_cleanup BRANCH=upstream-overlay/pr5-1-1 GH_SHIM_FAIL=1
-check "cleanup: a failing delete fails" "${work}/cln.err" failed "${cln_rc}"
+check "cleanup: a failing delete of an existing branch fails" "${work}/cln.err" failed "${cln_rc}"
+got=$(target_state upstream-overlay/pr5-1-1)
+eq "cleanup: a failing delete leaves the branch" "${got}" there
 run_cleanup BRANCH=upstream-overlay/pr5-1-1
 check "cleanup: deletes another overlay branch by its name" "${work}/cln.out" same "${cln_rc}" 0
 
@@ -303,6 +308,40 @@ check "wiring: publish waits for compose" "needs" needs publish compose
 check "wiring: publish waits for cleanup" "needs" needs publish cleanup
 check "wiring: the description gets the base of the overlay" "report" has "${workflow}" "OVERLAY_BASE_SHA: \${{ needs.compose.outputs.base_sha }}"
 check "wiring: publish checks the commit line 25.12 built" "decide" has "${workflow}" "\"\${FEED_SHA_25_12}\" != \"\${OVERLAY_SHA}\""
+
+# The same configuration as ci.yml: every input that ci.yml takes from its
+# config job update.yml takes, under the same name, from the detect job (which
+# reads the same file with the same script), and detect has a step that runs
+# scripts/images/config.sh.
+ci_workflow="${script_dir}/../.github/workflows/ci.yml"
+# Print "<input>=<output name>" for the inputs of a job whose value reads an
+# output of the given job, except package, the feed and the tests path
+# (not settings of config.yml).
+#
+# Arguments:
+#   $1  workflow file
+#   $2  job whose inputs are read
+#   $3  job whose outputs they read (config or detect)
+config_inputs() {
+	yq -r ".jobs.\"$2\".with | to_entries[] | select(.value | tag == \"!!str\") | select(.value | contains(\"needs.$3.outputs.\")) | .key + \"=\" + (.value | split(\"outputs.\")[1] | split(\" \")[0])" "$1" | grep -v '^package=\|^feed_\|^tests_path='
+}
+for job in build-25-12 build-main test-25-12 test-main image-25-12 image-main; do
+	want=$(config_inputs "${ci_workflow}" "${job}" config | tr '\n' ' ')
+	got=$(config_inputs "${workflow}" "${job}" detect | tr '\n' ' ')
+	check "wiring: ${job} gets what ci.yml gives it from config.yml" "${want}" same "${got}" "${want}"
+	check "wiring: ${job} gets at least one setting from config.yml" "none" test -n "${got}"
+done
+config_run=$(wf '.jobs.detect.steps[] | select(.id == "images").run')
+eq "wiring: detect reads config.yml with scripts/images/config.sh" "${config_run}" "scripts/images/config.sh netbird | tee -a \"\${GITHUB_OUTPUT}\""
+for key in profiles packages targets memory apk_timeout services_disabled; do
+	got=$(wf ".jobs.detect.outputs.${key}")
+	eq "wiring: detect exports ${key} from the config step" "${got}" "\${{ steps.images.outputs.${key} }}"
+done
+check "wiring: detect self-tests the config reader" "selftest" has "${workflow}" "scripts/images/selftest.sh"
+got=$(wf '.jobs."test-main".with.test_secrets')
+eq "wiring: the NetBird runtime tests get NB_SETUP_KEY" "${got}" NB_SETUP_KEY
+got=$(wf '.jobs."test-main".secrets')
+eq "wiring: the tests inherit the repository secrets" "${got}" inherit
 
 # Write access only where the overlay branch is pushed and deleted.
 writers=$(wf '.jobs | to_entries[] | select(.value.permissions.contents == "write") | .key' | sort | tr '\n' ' ')
