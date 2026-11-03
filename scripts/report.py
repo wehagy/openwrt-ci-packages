@@ -316,6 +316,22 @@ def overlay_text(
     return f"{what}: {args.overlay_repository} @ `{built}`"
 
 
+def result_file_text(line: str, line_results: dict) -> str:
+    """What the leg of the line wrote about itself (scripts/line-result.sh).
+
+    It says where a line stopped even when no worker job ran (a build that failed
+    in its setup job has no job below it).
+    """
+    found = line_results.get(line)
+    if found is None:
+        return "Result file of the leg: **missing**."
+    return (
+        f"Result file of the leg: build `{safe_text(found.get('build', ''))}`, "
+        f"test `{safe_text(found.get('test', ''))}`, "
+        f"images `{safe_text(found.get('image', ''))}`."
+    )
+
+
 def counts_row(counts: Counts) -> str:
     """The Passed / Skipped / Failed cells of one suite (integers only)."""
     return f"{int(counts.passed)} | {int(counts.skipped)} | {int(counts.failed)}"
@@ -449,6 +465,7 @@ def build_body(
     for line in args.line_list:
         verdict = "passed" if line_passed(jobs, line, line_results) else "FAILED"
         out.append(f"### Line `{line}`: {verdict}\n")
+        out.append(result_file_text(line, line_results) + "\n")
         out.append("| Stage | Item | Result |\n|---|---|---|")
         for stage in STAGES:
             group = sorted(

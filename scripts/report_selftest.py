@@ -287,6 +287,11 @@ class ReportTest(unittest.TestCase):
         self.assertIn("**failure** (step: Run tests) [log](", body)
         self.assertIn("Line `25.12` did not pass", body)
         self.assertIn("because the reference line `main` passed", body)
+        self.assertIn(
+            "### Line `25.12`: FAILED\n\nResult file of the leg: build `success`, "
+            "test `failure`, images `success`.",
+            body,
+        )
 
     def test_a_failed_line_says_it_is_the_backport_check(self) -> None:
         failed = result_for("25.12", LINES, build="failure", passed=False)
@@ -334,6 +339,7 @@ class ReportTest(unittest.TestCase):
         body, _ = self.body(line_results={"25.12": None})
         self.assertIn("| `25.12` **FAILED** |", body)
         self.assertIn("Its result file is missing", body)
+        self.assertIn("Result file of the leg: **missing**.", body)
         self.assertIn("| `main` passed |", body)
 
     def test_three_lines_one_failing_and_two_passing(self) -> None:

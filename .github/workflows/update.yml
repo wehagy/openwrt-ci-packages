@@ -45,7 +45,8 @@
 # two jobs only); they use no secret and run no package code.
 #
 # The workflows and the scripts of the base both come from its main (`@main` and
-# ci_ref: main; ci_ref defaults to main, it is kept explicit to match `@main`).
+# ci_ref: main, in line.yml; ci_ref defaults to main, it is kept explicit to match
+# `@main`).
 name: update
 
 on:
