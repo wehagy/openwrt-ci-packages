@@ -411,6 +411,22 @@ class ReportTest(unittest.TestCase):
         self.assertTrue(report.line_passed(jobs, "main", self.files))
         self.assertIn(f"Line `{THIRD}` did not pass", body)
 
+    def test_the_upstream_link_counts_the_tests_of_the_reference_line(self) -> None:
+        lines = [THIRD, "25.12"]
+        body, _ = self.body(
+            lines=lines,
+            reference=THIRD,
+            results={
+                (THIRD, "x86-64"): junit((3, 0, 0), (7, 0, 0)),
+                ("25.12", "x86-64"): junit((3, 0, 0), (1, 0, 0)),
+            },
+            package_tests="present",
+        )
+        link = next(r for r in body.splitlines() if r.startswith("https://github.com/"))
+        text = parse_qs(urlsplit(link).query)["body"][0]
+        self.assertIn("package runtime tests: 7 passed, 0 skipped, 0 failed)", text)
+        self.assertIn(f"(OpenWrt {THIRD} SDK)", text)
+
     def test_line_results_are_read_per_line_and_checked(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             for line, data in all_results(["main", "25.12", THIRD]).items():
@@ -429,6 +445,13 @@ class ReportTest(unittest.TestCase):
             )
             self.assertEqual(sorted(found), sorted(["main", THIRD]))
             self.assertEqual(report.read_line_results(tmp, "other", ["main"]), {})
+            # A file in the directory of this package that says it is another
+            # package's is not read either.
+            stray = os.path.join(tmp, "line-result-netbird-25.12")
+            os.makedirs(stray, exist_ok=True)
+            with open(os.path.join(stray, "result.json"), "w") as handle:
+                json.dump(dict(result_for("25.12", LINES), package="other"), handle)
+            self.assertEqual(report.read_line_results(tmp, "netbird", ["25.12"]), {})
 
     def test_job_names_do_not_depend_on_the_name_of_the_matrix_job(self) -> None:
         for outer in ("lines (main)", "lines", "lines (netbird, main, pr)"):
