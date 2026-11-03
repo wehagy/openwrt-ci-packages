@@ -367,8 +367,8 @@ jobs:
 
   # One leg per line (line.yml), all in parallel: build, QEMU test, images. A
   # failed leg does not stop the others (the matrix does not fail fast), and each leg writes
-  # its own artifact line-result-<package>-<line>. packages: write because
-  # build.yml may rebuild the SDK image (see README.md).
+  # its own artifact line-result-<package>-<line>. The images of GHCR are only
+  # read (refresh-images.yml writes them, see README.md).
   # tests_path: a missing directory means only the generic test runs.
   # `secrets: inherit` passes the repository secrets, not those of an
   # environment, so TEST_UPSTREAM_TOKEN (environment review) does not reach the
@@ -380,7 +380,6 @@ jobs:
       matrix: ${{ fromJSON(needs.compose.outputs.matrix) }}
     permissions:
       contents: read
-      packages: write
     uses: ./.github/workflows/line.yml
     with:
       line: ${{ matrix.line }}

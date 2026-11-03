@@ -26,10 +26,6 @@ on:
         description: Number of the pull request of openwrt/packages (digits only)
         type: string
         required: true
-      refresh_sdk:
-        description: Rebuild the SDK images of the lines even when fresh
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -128,8 +124,7 @@ jobs:
   # package. kind overlay: the other lines of a package with packages/<name>/
   # here, built from the overlay commit of that line in this repository. No
   # secrets (see the header: no `secrets:`, no `test_secrets`); a missing tests
-  # directory means only the generic test. packages: write because build.yml
-  # may rebuild the SDK image.
+  # directory means only the generic test. The images of GHCR are only read.
   lines:
     if: >-
       ${{ !cancelled() && needs.resolve.result == 'success'
@@ -140,14 +135,12 @@ jobs:
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_legs) }}
     permissions:
       contents: read
-      packages: write
     uses: ./.github/workflows/line.yml
     with:
       line: ${{ matrix.line }}
       package: ${{ matrix.package }}
       feed_repository: ${{ matrix.kind == 'pr' && 'openwrt/packages' || github.repository }}
       feed_ref: ${{ matrix.kind == 'pr' && needs.resolve.outputs.head_sha || fromJSON(needs.compose.outputs.overlays || '{}')[matrix.line].sha }}
-      refresh_sdk: ${{ inputs.refresh_sdk == true }}
       profiles: ${{ matrix.profiles }}
       packages: ${{ matrix.image_packages }}
       targets: ${{ matrix.targets }}

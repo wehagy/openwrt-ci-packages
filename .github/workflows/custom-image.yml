@@ -237,8 +237,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: scripts/upstream-pr/compose.sh
 
-  # The package for the images. packages: write because build.yml may rebuild
-  # the SDK image of a new architecture.
+  # The package for the images. The SDK images of GHCR are only read.
   build:
     if: >-
       ${{ !cancelled() && needs.config.result == 'success'
@@ -248,7 +247,6 @@ jobs:
     needs: [config, source, compose]
     permissions:
       contents: read
-      packages: write
     uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
       ci_ref: main

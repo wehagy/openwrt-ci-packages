@@ -44,10 +44,6 @@ on:
         description: Ref or commit of feed_repository (empty - the branch of the line)
         type: string
         default: ""
-      refresh_sdk:
-        description: Rebuild the SDK image of the line even when fresh
-        type: boolean
-        default: false
       profiles:
         description: Image profiles (they also select the architectures to build)
         type: string
@@ -106,12 +102,11 @@ jobs:
             exit 1
           fi
 
-  # packages: write because build.yml may rebuild the SDK image (GHCR).
+  # build.yml only reads the SDK image of GHCR (refresh-images.yml writes it).
   build:
     needs: check
     permissions:
       contents: read
-      packages: write
     uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
     with:
       ci_ref: main
@@ -119,7 +114,6 @@ jobs:
       package: ${{ inputs.package }}
       feed_repository: ${{ inputs.feed_repository }}
       feed_ref: ${{ inputs.feed_ref }}
-      refresh_sdk: ${{ inputs.refresh_sdk }}
       profiles: ${{ inputs.profiles }}
       targets: ${{ inputs.targets }}
 

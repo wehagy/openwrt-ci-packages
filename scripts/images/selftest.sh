@@ -548,6 +548,48 @@ else
 	report "workflow: ci.yml's lines input is free text, validated by config.sh" "type ${got}"
 fi
 
+# --- refresh-config.sh: the lists of the daily image refresh ----------------
+rcfg=${here}/refresh-config.sh
+fx2=${work}/fx2
+mkdir -p "${fx2}/aaa" "${fx2}/bbb"
+cat >"${fx2}/aaa/config.yml" <<'EOF'
+package: aaa
+lines: [main, "25.12"]
+targets: x86-64 malta-le
+images:
+  profiles:
+    - x86/64/generic
+    - ath79/generic/tplink_archer-c7-v4:too-big
+EOF
+cat >"${fx2}/bbb/config.yml" <<'EOF'
+package: bbb
+lines: [main]
+targets: x86-64 armsr-armv8
+images:
+  profiles:
+    - x86/64/generic
+    - mediatek/filogic/bananapi_bpi-r3
+    - ath79/generic/tplink_archer-c7-v4
+EOF
+expect_line "refresh-config: the union of the lines" "lines=main 25.12" env PACKAGES_DIR="${fx2}" "${rcfg}"
+expect_line "refresh-config: profiles once each, without :too-big" "profiles=x86/64/generic ath79/generic/tplink_archer-c7-v4 mediatek/filogic/bananapi_bpi-r3" env PACKAGES_DIR="${fx2}" "${rcfg}"
+expect_line "refresh-config: the union of the targets" "targets=x86-64 malta-le armsr-armv8" env PACKAGES_DIR="${fx2}" "${rcfg}"
+fx3=${work}/fx3
+mkdir -p "${fx3}/aaa" "${fx3}/ccc"
+cp "${fx2}/aaa/config.yml" "${fx3}/aaa/config.yml"
+printf 'package: ccc\nlines: [main]\nimages:\n  profiles:\n    - x86/64/generic\n' >"${fx3}/ccc/config.yml"
+expect_line "refresh-config: a package with the default targets leaves them empty" "targets=" env PACKAGES_DIR="${fx3}" "${rcfg}"
+run env PACKAGES_DIR="${fx3}" "${rcfg}"
+case "${out_text}" in
+*"targets=x86"*) report "refresh-config: no partial targets when one package has the default" "got: ${out_text}" ;;
+*) report "refresh-config: no partial targets when one package has the default" ok ;;
+esac
+mkdir -p "${work}/empty"
+expect_refused "refresh-config: no package" "no packages/<name>/config.yml" env PACKAGES_DIR="${work}/empty" "${rcfg}"
+mkdir -p "${work}/bad/aaa"
+printf 'package: zzz\nlines: [main]\n' >"${work}/bad/aaa/config.yml"
+expect_refused "refresh-config: an invalid config stops everything" "package is not aaa" env PACKAGES_DIR="${work}/bad" "${rcfg}"
+
 if [ "${failed}" -ne 0 ]; then
 	echo "images self-test: ${failed} of ${total} case(s) failed" >&2
 	exit 1

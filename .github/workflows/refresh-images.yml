@@ -1,0 +1,81 @@
+# Refreshes, every day, the SDK and ImageBuilder images of GHCR that the builds
+# of this repository read: ghcr.io/wehagy/openwrt-sdk (one per line and package
+# architecture) and ghcr.io/wehagy/openwrt-imagebuilder (one per line and
+# target of the image profiles), through the reusable refresh-images.yml of the
+# base wehagy/openwrt-ci. The lists come from packages/*/config.yml (lines, QEMU
+# test targets, image profiles), so a new package, line or profile gets its
+# images at the next refresh. An image is rebuilt only when its upstream changed
+# (see the base README). It runs from the default branch only (a schedule does),
+# or by hand:
+#
+#   gh workflow run refresh-images.yml --repo wehagy/openwrt-ci-packages
+#   gh workflow run refresh-images.yml --repo wehagy/openwrt-ci-packages -f force=true
+#
+# The builds of ci.yml, update.yml, upstream-pr.yml and custom-image.yml only
+# read the images and fail with that command when one is missing. The job that
+# calls the base has packages: write and the repository needs access to both
+# packages (README, "GHCR images"). No package, feed or pull request code runs
+# here, and no cache is used.
+name: refresh-images
+
+on:
+  schedule:
+    # Before update.yml (05:17), which reads the images.
+    - cron: "43 3 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild the images even when they are up to date
+        type: boolean
+        default: false
+
+# One refresh at a time: two would push the same tags.
+concurrency:
+  group: refresh-images
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  config:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    outputs:
+      lines: ${{ steps.read.outputs.lines }}
+      profiles: ${{ steps.read.outputs.profiles }}
+      targets: ${{ steps.read.outputs.targets }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
+      # The lines of the base (harness/lines.yml): a line of a config that the
+      # base does not have fails here, before any image job.
+      - name: Check out the base (its lines)
+        uses: actions/checkout@v7.0.1
+        with:
+          repository: wehagy/openwrt-ci
+          ref: main
+          path: ci-base
+          persist-credentials: false
+
+      - name: Self-test the configuration scripts
+        run: scripts/images/selftest.sh
+
+      - name: Read packages/*/config.yml
+        id: read
+        run: scripts/images/refresh-config.sh | tee -a "${GITHUB_OUTPUT}"
+
+  refresh:
+    needs: config
+    permissions:
+      contents: read
+      packages: write
+    uses: wehagy/openwrt-ci/.github/workflows/refresh-images.yml@main
+    with:
+      ci_ref: main
+      lines: ${{ needs.config.outputs.lines }}
+      profiles: ${{ needs.config.outputs.profiles }}
+      targets: ${{ needs.config.outputs.targets }}
+      force: ${{ inputs.force == true }}
