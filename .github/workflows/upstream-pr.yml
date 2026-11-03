@@ -12,7 +12,7 @@
 # `workflow_dispatch` only (never pull_request_target). It builds the head of
 # the PR (refs/pull/<n>/head, as a commit SHA) without merging its base.
 #
-# The base is called at `@main` with `ci_ref: main` (both must stay equal).
+# The base is called at `@feat/image-inputs` with `ci_ref: feat/image-inputs` (both must stay equal).
 name: upstream-pr
 
 on:
@@ -109,14 +109,16 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       feed_repository: openwrt/packages
       feed_ref: ${{ needs.resolve.outputs.head_sha }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
+      profiles: ${{ matrix.profiles }}
+      targets: ${{ matrix.targets }}
 
   # tests_path: a missing directory means only the generic test runs. No
   # secrets (see the header).
@@ -125,13 +127,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_all) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
       source: artifact
       tests_path: ${{ matrix.tests_path }}
+      targets: ${{ matrix.targets }}
+      memory: ${{ matrix.memory }}
 
   image-pr:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -139,11 +143,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.line }}
       package: ${{ matrix.package }}
+      profiles: ${{ matrix.profiles }}
+      packages: ${{ matrix.image_packages }}
 
   # --- the other line: its branch with the changed directories overlaid -------
   # Only the packages that have packages/<name>/ here.
@@ -156,14 +162,16 @@ jobs:
     permissions:
       contents: read
       packages: write
-    uses: wehagy/openwrt-ci/.github/workflows/build.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/build.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       feed_repository: ${{ github.repository }}
       feed_ref: ${{ needs.compose.outputs.sha }}
       refresh_sdk: ${{ inputs.refresh_sdk == true }}
+      profiles: ${{ matrix.profiles }}
+      targets: ${{ matrix.targets }}
 
   test-other:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -171,13 +179,15 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/test.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/test.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
       source: artifact
       tests_path: ${{ matrix.tests_path }}
+      targets: ${{ matrix.targets }}
+      memory: ${{ matrix.memory }}
 
   image-other:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -185,11 +195,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.resolve.outputs.matrix_full) }}
-    uses: wehagy/openwrt-ci/.github/workflows/images.yml@main
+    uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
     with:
-      ci_ref: main
+      ci_ref: feat/image-inputs
       line: ${{ needs.resolve.outputs.other_line }}
       package: ${{ matrix.package }}
+      profiles: ${{ matrix.profiles }}
+      packages: ${{ matrix.image_packages }}
 
   # Only build.yml reads the feed (test.yml and images.yml use the artifact), so
   # the overlay branch can go as soon as the builds of the other line are done.
@@ -204,17 +216,15 @@ jobs:
       run:
         shell: bash
     steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Delete the overlay branch
         env:
           BRANCH: ${{ needs.compose.outputs.branch }}
           GH_TOKEN: ${{ github.token }}
-        run: |
-          case "${BRANCH}" in
-            upstream-overlay/*) ;;
-            *) echo "::error::refusing to delete '${BRANCH}'"; exit 1 ;;
-          esac
-          gh api -X DELETE "repos/${GITHUB_REPOSITORY}/git/refs/heads/${BRANCH}"
-          echo "deleted ${GITHUB_REPOSITORY} ${BRANCH}" | tee -a "${GITHUB_STEP_SUMMARY}"
+        run: scripts/upstream-pr/cleanup.sh
 
   # The result of every job in one table (the run's own graph has them too).
   report:

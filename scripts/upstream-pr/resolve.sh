@@ -133,7 +133,21 @@ while read -r dir; do
 	else
 		is_local=false
 	fi
-	printf '%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" >>"${work}/rows.tsv"
+	# The images and tests of a package with packages/<name>/ come from its
+	# config.yml (scripts/images/config.sh); the others get the base defaults.
+	profiles=
+	targets=
+	memory=
+	image_packages=
+	if [ "${is_local}" = true ]; then
+		cfg=$("${here}/../images/config.sh" "${name}") || exit 1
+		profiles=$(printf '%s\n' "${cfg}" | sed -n -e 's/^profiles=//p')
+		targets=$(printf '%s\n' "${cfg}" | sed -n -e 's/^targets=//p')
+		memory=$(printf '%s\n' "${cfg}" | sed -n -e 's/^memory=//p')
+		image_packages=$(printf '%s\n' "${cfg}" | sed -n -e 's/^packages=//p')
+	fi
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" \
+		"${profiles}" "${targets}" "${memory}" "${image_packages}" >>"${work}/rows.tsv"
 done <"${work}/pkgdirs.txt"
 if [ ! -s "${work}/rows.tsv" ]; then
 	while read -r line_skipped; do
@@ -152,7 +166,8 @@ fi
 rows_json=$(jq -R -s -c '
 	split("\n") | map(select(length > 0) | split("\t")
 	| {package: .[0], dir: .[1], local: (.[2] == "true"),
-	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end)})' "${work}/rows.tsv")
+	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end),
+	   profiles: .[3], targets: .[4], memory: .[5], image_packages: .[6]})' "${work}/rows.tsv")
 matrix_all=$(printf '%s' "${rows_json}" | jq -c '{include: .}')
 matrix_full=$(printf '%s' "${rows_json}" | jq -c '{include: map(select(.local))}')
 has_full=$(printf '%s' "${rows_json}" | jq -r 'any(.[]; .local)')
@@ -183,7 +198,7 @@ skipped_count=$(wc -l <"${work}/skipped.txt")
 	echo "- built as the head commit, without merging the base branch (refs/pull/${PR_NUMBER}/merge is not used)"
 	echo "- no secret reaches the build or the tests of an upstream pull request: tests that need one skip"
 	echo "- changed packages: ${count} (directory, name)"
-	while IFS="$(printf '\t')" read -r name dir is_local; do
+	while IFS="$(printf '\t')" read -r name dir is_local _; do
 		if [ "${is_local}" = true ]; then
 			pipeline="full pipeline on ${line} and, overlaid on ${other_branch}, on ${other}"
 		else
