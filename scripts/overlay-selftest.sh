@@ -179,7 +179,10 @@ eq "compose: a pull request overlay: message" "${got}" "overlay of net/netbird f
 # date of a commit answer what `--jq` would print (the shim ignores --jq).
 # GH_SHIM_FAIL makes every call fail, GH_SHIM_FAIL_DELETE=<text> the deletes
 # of the refs whose path contains the text,
-# GH_SHIM_LIST_ALL makes the listing return every branch. Every call is logged.
+# GH_SHIM_LIST_ALL makes the listing return every branch, GH_SHIM_PAGE=<n>
+# makes a listing without --paginate return its first n branches only (as the
+# API does with its first page), GH_SHIM_BAD_DATE makes the date of a commit
+# unreadable. Every call is logged.
 mkdir "${work}/bin"
 cat >"${work}/bin/gh" <<'SHIM'
 #!/usr/bin/env sh
@@ -196,10 +199,19 @@ case "$*" in
 *matching-refs/heads/*)
 	prefix=${path##*/matching-refs/heads/}
 	[ -z "${GH_SHIM_LIST_ALL:-}" ] || prefix=
-	git --git-dir="${SHIM_TARGET}" for-each-ref --format='%(refname)%09%(objectname)' "refs/heads/${prefix}*"
+	limit=1000000
+	case " $* " in
+	*" --paginate "*) ;;
+	*) limit=${GH_SHIM_PAGE:-1000000} ;;
+	esac
+	git --git-dir="${SHIM_TARGET}" for-each-ref --count="${limit}" --format='%(refname)%09%(objectname)' "refs/heads/${prefix}*"
 	;;
 */commits/*)
-	git --git-dir="${SHIM_TARGET}" log -1 --format=%ct "${path##*/}"
+	if [ -n "${GH_SHIM_BAD_DATE:-}" ]; then
+		echo "not-a-date"
+	else
+		git --git-dir="${SHIM_TARGET}" log -1 --format=%ct "${path##*/}"
+	fi
 	;;
 *DELETE*)
 	case "${path}" in
@@ -330,6 +342,7 @@ state_case "sweep: an old branch of upstream-pr.yml stays" upstream-overlay/pr7-
 state_case "sweep: an old branch of custom-image.yml stays" upstream-overlay/custom-pr9-1-1 there
 state_case "sweep: main stays" main there
 check "sweep: counts" "${work}/swp.out" has "${work}/swp.out" "sweep: deleted 1, kept 1, failed 0"
+check "sweep: deletes through cleanup.sh" "${work}/swp.out" has "${work}/swp.out" "deleted wehagy/openwrt-ci-packages upstream-overlay/update-old-1-1"
 
 run_sweep MAX_AGE_HOURS=0
 state_case "sweep: with no minimum age a young update branch goes too" upstream-overlay/update-fresh-1-1 gone
@@ -358,6 +371,30 @@ check "sweep: a bad age fails" "${work}/swp.err" failed "${swp_rc}"
 check "sweep: a bad age asks nothing" "${work}/gh.log" empty "${work}/gh.log"
 run_sweep
 state_case "sweep: the next sweep deletes what the failing one left" upstream-overlay/update-old-2-1 gone
+
+# A date that cannot be read fails the job (visibly, in the counts) and deletes
+# nothing: the age of the branch is unknown.
+aged_branch upstream-overlay/update-baddate-1-1 172800
+run_sweep GH_SHIM_BAD_DATE=1
+check "sweep: an unreadable date fails the sweep" "${work}/swp.err" failed "${swp_rc}"
+check "sweep: an unreadable date is reported" "${work}/swp.out" has "${work}/swp.out" "::error::could not read the date"
+check "sweep: an unreadable date is counted" "${work}/swp.out" has "${work}/swp.out" "sweep: deleted 0, kept 0, failed 1"
+check "sweep: an unreadable date deletes nothing" "${work}/gh.log" lacks "${work}/gh.log" "DELETE"
+state_case "sweep: an unreadable date leaves the branch" upstream-overlay/update-baddate-1-1 there
+run_sweep
+state_case "sweep: a readable date deletes it after all" upstream-overlay/update-baddate-1-1 gone
+
+# More branches than one page of the API: every page is read, none is left
+# behind unnoticed.
+aged_branch upstream-overlay/update-page-1-1 172800
+aged_branch upstream-overlay/update-page-2-1 172800
+aged_branch upstream-overlay/update-page-3-1 172800
+run_sweep GH_SHIM_PAGE=2
+check "sweep: several pages: exits 0" "${work}/swp.err" same "${swp_rc}" 0
+check "sweep: several pages: lists with --paginate" "${work}/gh.log" has "${work}/gh.log" "--paginate"
+state_case "sweep: several pages: a branch of the first page goes" upstream-overlay/update-page-1-1 gone
+state_case "sweep: several pages: a branch past the first page goes" upstream-overlay/update-page-3-1 gone
+check "sweep: several pages: counts" "${work}/swp.out" has "${work}/swp.out" "sweep: deleted 3, kept 0, failed 0"
 
 # --- update.yml: the wiring of the jobs --------------------------------------
 # The value of an expression on update.yml, as text.
