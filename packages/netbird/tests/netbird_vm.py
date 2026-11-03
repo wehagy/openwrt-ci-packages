@@ -201,22 +201,36 @@ class Vm:
         `timeout` s later: `still_running`). `sigkill` is whether procd
         logged that this pid was not stopped on SIGTERM.
 
+        Resolution: /proc/uptime has 10 ms; the poll sleeps 0.1 s with
+        `usleep` when the image has it. BusyBox `sleep` takes whole seconds
+        only (`sleep 0.1` is "invalid number"), so without `usleep` the poll
+        spins on /proc/uptime (bounded by the deadline and an iteration
+        count). `poll` says which one ran.
+
         Returns a dict: stop_rc, pid, duration_s, sigkill (bool),
-        still_running (bool); the values are None where the VM printed none.
+        still_running (bool), poll ("usleep" or "busy"); the values are None
+        where the VM printed none.
         """
+        max_polls = int(timeout) * 200
         script = "\n".join(
             [
                 "now() { cut -d' ' -f1 /proc/uptime; }",
                 "pid=$(pidof netbird | cut -d' ' -f1)",
+                "if command -v usleep >/dev/null; then",
+                "  nap='usleep 100000'; poll=usleep",
+                "else",
+                "  nap=:; poll=busy",
+                "fi",
                 "t0=$(now)",
                 f"{INIT_SCRIPT} stop; echo stop_rc=$?",
-                f"deadline=$(( ${{t0%.*}} + {int(timeout)} ))",
+                f"deadline=$(( ${{t0%.*}} + {int(timeout)} )); i=0",
                 'while [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; do',
                 '  t=$(now); [ "${t%.*}" -gt "$deadline" ] && { echo still_running=1; break; }',
-                "  sleep 0.1 || sleep 1",
+                f"  i=$((i + 1)); [ $i -gt {max_polls} ] && {{ echo still_running=1; break; }}",
+                "  $nap",
                 "done",
                 "t1=$(now)",
-                "echo pid=$pid t0=$t0 t1=$t1",
+                "echo pid=$pid t0=$t0 t1=$t1 poll=$poll",
                 'echo sigkill=$(logread | grep -c "pid $pid not stopped on SIGTERM")',
             ]
         )
@@ -242,6 +256,7 @@ class Vm:
             "still_running": found.get("still_running") == "1",
             "sigkill": int(found.get("sigkill", "0") or 0) > 0,
             "duration_s": None,
+            "poll": found.get("poll"),
             "output": out + err,
         }
         try:

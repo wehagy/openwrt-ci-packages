@@ -18,17 +18,23 @@ official client container, same version as the package, same setup key):
 procd term_timeout (read this before changing the stop test): the init script
 of the package has no `procd_set_param term_timeout`, so procd waits 5 s for
 SIGTERM and then sends SIGKILL, which leaves the nftables table `netbird` and
-wt0 behind. The daemon needs more than 5 s on the emulated CPUs of this CI
-(it closes up to ~70 peers: the test's own peer mesh). THE TEST, NOT THE
-PACKAGE, applies `procd_set_param term_timeout 60` in the VM before anything
-else (TERM_TIMEOUT below) and fails if procd does not report it. Measured on
-the 25.12 line (netbird 0.78.1, 10 runs per arm, emulated targets): as shipped
-the stop test failed in 7 of 30 jobs (10 procd SIGKILLs); with 60 s, 0 of 30
-and no SIGKILL, longest shutdown 24.29 s (malta-be). The measurement is in
-the README ("procd term_timeout"). When the package gets a term_timeout of
-its own, or the upstream init script changes, remove or revisit
-TERM_TIMEOUT: a stop that takes more than 5 s is reported as a warning in the
-job summary, because the package as shipped would have been SIGKILLed.
+wt0 behind. The daemon can need more than 5 s on the emulated CPUs of this CI;
+the time grows with the number of peers it closes, but the peer count alone
+does not explain the slow cases (17.71 s was seen with at most 14 peers).
+THE TEST, NOT THE PACKAGE, applies `procd_set_param term_timeout 60` in the VM
+before anything else (TERM_TIMEOUT below) and fails if procd does not report
+it, also right before the stop. Measured on the 25.12 line (netbird 0.78.1,
+10 runs per arm, emulated targets, shutdown clock with ~1 s resolution): as
+shipped the stop test failed in 7 of 30 jobs (10 procd SIGKILLs); with 60 s,
+0 of 30 and no SIGKILL, longest shutdown 24.29 s (malta-be). CI now tests the
+package versions of the lines (25.12: netbird 0.81.4 from the artifact build;
+main: 0.82.0), not 0.78.1. The details are in the README, in the bullet
+"procd `term_timeout 60` is applied by the test, not by the package". When the
+package gets a term_timeout of its own, or the upstream init script changes,
+remove or revisit TERM_TIMEOUT: a stop that takes more than 5 s is reported
+as a warning (job summary, junit and a GitHub `::warning` annotation in the
+job log; the job stays green), because the package as shipped would have been
+SIGKILLed.
 
 Environment variables:
   NB_SETUP_KEY             setup key (test_secrets); absent or empty: every
@@ -239,9 +245,10 @@ def test_memory_is_recorded(vm, record_property):
 
 
 def stop_report(duration_s, sigkill, term_timeout):
-    """The stop measurement as (summary lines, warning text or None)."""
-    warning = None
+    """The stop measurement as (summary lines, warning text, annotation title)."""
+    warning = title = None
     if sigkill:
+        title = "netbird stop needed SIGKILL"
         warning = (
             f"procd sent SIGKILL although term_timeout is {term_timeout} s:"
             " the daemon did not exit on SIGTERM in time"
@@ -252,6 +259,7 @@ def stop_report(duration_s, sigkill, term_timeout):
             " s): the package as shipped (procd default term_timeout"
             f" {PROCD_DEFAULT_TERM_TIMEOUT} s) would have sent SIGKILL"
         )
+        title = f"netbird stop slower than {PROCD_DEFAULT_TERM_TIMEOUT} s"
     lines = [
         (
             f"- netbird stop: {duration_s} s from the stop call to the process exit;"
@@ -259,12 +267,30 @@ def stop_report(duration_s, sigkill, term_timeout):
         ),
         (
             f"- term_timeout {term_timeout} s is applied by the test, not by the"
-            ' package (see the README, "procd term_timeout")'
+            " package (see the README)"
         ),
     ]
     if warning:
         lines += ["", "> [!WARNING]", f"> WARNING: {warning}"]
-    return lines, warning
+    return lines, warning, title
+
+
+def annotate_warning(config, title, message):
+    """Print `::warning title=...::message` as its own line of the step log.
+
+    The runner parses workflow commands at the start of a line. A `log.warning`
+    reaches the log through pytest's live logging (`--log-cli-level`), which
+    prefixes the level and the logger name, so it is not parsed; the command
+    goes through the terminal reporter, after a line break.
+    """
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    line = f"::warning title={title}::{escaped}"
+    reporter = config.pluginmanager.getplugin("terminalreporter")
+    if reporter is None:
+        print(line, flush=True)
+        return
+    reporter.ensure_newline()
+    reporter.write_line(line)
 
 
 def write_summary(lines):
@@ -277,15 +303,22 @@ def write_summary(lines):
         handle.write(f"\n### netbird stop ({title})\n" + "\n".join(lines) + "\n")
 
 
-def test_stop_removes_table_and_wt0(vm, record_property):
+def test_stop_removes_table_and_wt0(vm, record_property, request):
     _require_connected()
     # The cleanup is only proved if the objects existed before the stop.
     assert State.nft_table_seen and State.wt0_seen, (
         "table netbird and wt0 were not both seen before the stop"
     )
     assert State.term_timeout == TERM_TIMEOUT, "procd term_timeout was not applied"
+    # Ask procd again: the fixture state is only what it reported at the start.
+    reported = vm.term_timeouts()
+    log.info("procd term_timeout reported right before the stop: %s", reported)
+    assert reported and all(value == TERM_TIMEOUT for value in reported.values()), (
+        f"procd does not report term_timeout {TERM_TIMEOUT} right before the stop:"
+        f" {reported}"
+    )
     measured = vm.stop_measured(STOP_TIMEOUT)
-    lines, warning = stop_report(
+    lines, warning, title = stop_report(
         measured["duration_s"], measured["sigkill"], State.term_timeout
     )
     log.info(
@@ -298,6 +331,7 @@ def test_stop_removes_table_and_wt0(vm, record_property):
     record_property("netbird_term_timeout_s", str(State.term_timeout))
     if warning:
         log.warning("%s", warning)
+        annotate_warning(request.config, title, warning)
         record_property("netbird_stop_warning", warning)
 
     assert measured["stop_rc"] == 0, (
