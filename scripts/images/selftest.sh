@@ -344,6 +344,38 @@ for f in ci upstream-pr custom-image; do
 	fi
 done
 
+# The `image` job of custom-image.yml must not run when the package was asked
+# for but not built (source or compose failed, build skipped). The `if:` of the
+# workflow is evaluated itself: its GitHub expression is turned into a jq
+# expression (needs.X.result -> .needs.X.result, && -> and, ...).
+#
+# Arguments:
+#   $1  case name
+#   $2  expected: run or skip
+#   $3  result of config
+#   $4  package output of config
+#   $5  result of build
+image_case() {
+	ic_expr=$(yq -r '.jobs.image.if' "${wf}" | tr '\n' ' ' |
+		sed -e 's/\${{//' -e 's/}}//' -e 's/!cancelled()/true/g' \
+			-e 's/&&/ and /g' -e 's/||/ or /g' -e "s/'/\"/g" -e 's/needs\./.needs./g')
+	ic_ctx=$(jq -n -c --arg c "$3" --arg p "$4" --arg b "$5" \
+		'{needs: {config: {result: $c, outputs: {package: $p}}, build: {result: $b}}}')
+	ic_got=$(jq -n --argjson ctx "${ic_ctx}" "\$ctx | (${ic_expr}) | if . then \"run\" else \"skip\" end" -r 2>&1)
+	if [ "${ic_got}" = "$2" ]; then
+		report "workflow: image job $1" ok
+	else
+		report "workflow: image job $1" "got '${ic_got}', expected '$2' (expression: ${ic_expr})"
+	fi
+}
+image_case "runs after a successful build" run success netbird success
+image_case "does not run when source or compose failed (build skipped, package asked)" skip success netbird skipped
+image_case "does not run after a failed build" skip success netbird failure
+image_case "does not run after a cancelled build" skip success netbird cancelled
+image_case "runs for images only (no package, build skipped)" run success "" skipped
+image_case "does not run when config failed" skip failure "" skipped
+image_case "does not run when config failed (build success)" skip failure netbird success
+
 if [ "${failed}" -ne 0 ]; then
 	echo "images self-test: ${failed} of ${total} case(s) failed" >&2
 	exit 1

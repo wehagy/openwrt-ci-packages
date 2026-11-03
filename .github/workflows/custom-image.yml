@@ -239,10 +239,14 @@ jobs:
       feed_repository: ${{ needs.compose.outputs.sha != '' && github.repository || needs.source.outputs.feed_repository || needs.config.outputs.feed_repository }}
       feed_ref: ${{ needs.compose.outputs.sha || needs.source.outputs.feed_ref || needs.config.outputs.feed_ref }}
 
+  # `build` is skipped when no package of ours was asked for (images only), and
+  # also when `source` or `compose` failed: only the first case may go on, the
+  # second one would download an artifact that was never built.
   image:
     if: >-
       ${{ !cancelled() && needs.config.result == 'success'
-      && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+      && (needs.build.result == 'success'
+      || (needs.build.result == 'skipped' && needs.config.outputs.package == '')) }}
     needs: [config, build]
     uses: wehagy/openwrt-ci/.github/workflows/images.yml@feat/image-inputs
     with:
