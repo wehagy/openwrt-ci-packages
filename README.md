@@ -186,7 +186,9 @@ and `nbci-vm-<run id>-<rand>`.
   `sleep` rejects `0.1` (`sleep: invalid number '0.1'`), so it polled every 1 s
   and its durations are overestimated by 0-1 s. The poll now sleeps with
   `usleep 100000` when the image has it, otherwise it spins on `/proc/uptime`
-  (10 ms); the log line `netbird stop measured` shows `poll`. Before the stop
+  (10 ms). The log line `netbird stop measured` shows which one ran: on all
+  8 targets of run 41556088402 (both lines) it was `busy`, so the images have
+  no `usleep`; the spin is bounded by the deadline and an iteration count. Before the stop
   the test asks procd again for `term_timeout` and fails if it is not 60.
 - The assertions and messages never print the key: it is a `Secret` object and
   command output goes through `redact()`.
