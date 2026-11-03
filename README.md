@@ -8,14 +8,22 @@ package test.
 
 ## Layout
 
-- `packages/<name>/config.yml`: data of the package. Today only `package`, the
-  name of a directory of `openwrt/packages` (read by the `config` job).
+- `packages/<name>/config.yml`: data of the package, read by
+  `scripts/images/config.sh`: `package` (a directory of `openwrt/packages`),
+  `images` (extra `packages`, `profiles`, optional `limits`) and, only when the
+  package needs something other than the base defaults, `memory` and `targets`
+  of the QEMU tests. The file documents every key.
 - `packages/<name>/tests/` (optional): pytest files that run next to the
   generic test in the QEMU VM. Missing directory: only the generic test runs.
   For `netbird` they are the runtime tests described in "NetBird runtime
   tests" below.
 - `.github/workflows/ci.yml`: calls the base for `netbird` on push to
   `feat/**` and on `workflow_dispatch` (`refresh_sdk`, `lines`).
+- `.github/workflows/custom-image.yml`: builds one image from a web form (see
+  "Building a custom image").
+- `scripts/images/`: `config.sh` (reads a package's `config.yml`), `custom.sh`
+  (validates the form), `pr-source.sh` (head or overlay of a pull request),
+  `summary.sh` (run summary) and `selftest.sh`, which the workflows run first.
 - `.github/workflows/upstream-pr.yml`: tests a pull request of `openwrt/packages`
   by number, `workflow_dispatch` only (see "Testing an upstream pull request").
 - `scripts/upstream-pr/`: its shell (`lib.sh`, `resolve.sh`, `compose.sh`) and
@@ -29,12 +37,21 @@ package test.
 | `config`                     | -                             | reads `packages/netbird/config.yml`                |
 | `build-25-12`, `build-main`  | `build.yml`                   | `packages: write`: may rebuild the SDK image       |
 | `test-25-12`, `test-main`    | `test.yml`, `source: artifact` | `tests_path`, `test_secrets: NB_SETUP_KEY`, `secrets: inherit` |
-| `image-25-12`, `image-main`  | `images.yml`                  | profiles of the base                               |
+| `image-25-12`, `image-main`  | `images.yml`                  | `profiles` and `packages` of `config.yml`          |
 
 - Each call passes `ci_ref`: the ref of `wehagy/openwrt-ci` the scripts are
   checked out from. It must equal the ref after `@` in `uses:`. No tags are
-  used. Both are `main` (`ci_ref` defaults to `main` in the base; it is kept
-  explicit so that it visibly matches `@main`).
+  used. **Temporary:** both are `feat/image-inputs` in `ci.yml`,
+  `upstream-pr.yml` and `custom-image.yml` while the base branch that adds the
+  `profiles`, `packages`, `archs`, `targets` and `memory` inputs is not merged;
+  they go back to `main` then (`scripts/images/selftest.sh` fails if `uses:` and
+  `ci_ref` differ).
+- What `config.yml` gives the calls: `build.yml` gets `profiles` (its default
+  `archs` are the architectures of the QEMU targets plus those of the
+  profiles) and `targets`; `test.yml` gets `targets` and `memory`; `images.yml`
+  gets `profiles` and `packages`. The base defaults apply to what the file
+  omits: all four QEMU targets and 128M of VM memory (netbird sets `memory:
+  256M`, because it was OOM-killed at 128M on x86-64, run 41480369349).
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
   `caller: wehagy/openwrt-ci-packages run commit <sha>, checkout HEAD <sha>`.
 
@@ -75,10 +92,87 @@ this repository still run (that code is ours, not the PR's).
    dropped), and `build.yml` builds its commit SHA; `cleanup` deletes the branch
    when the builds are done. Packages without `packages/<name>/` run on the
    PR's line only.
-4. The base is called at `@main` with `ci_ref: main`.
+4. The base is called at the ref named in the file (temporarily
+   `feat/image-inputs`) with the same `ci_ref`. Each package gets its
+   `profiles`, `packages`, `targets` and `memory` from its `config.yml`
+   (`resolve.sh` reads them with `scripts/images/config.sh`).
 
 Limit: one failed build of a package skips the test jobs of all packages of
 that line (they need the whole matrix).
+
+## Building a custom image (`custom-image.yml`)
+
+Run it from the web UI: **Actions > custom-image > Run workflow**, fill the
+form and press the button. It builds one image and uploads it as the artifact
+`images-<package>-<line>-<profile id>` (`nopkg` when there is no package); the
+run summary shows the source, the image size against the device limit when it
+is known, and the packages the image installs.
+
+| Field             | Meaning                                                                      |
+|-------------------|------------------------------------------------------------------------------|
+| `line`            | `main` or `25.12`                                                            |
+| `profile`         | one of the configured profiles (`packages/netbird/config.yml`) or `other`    |
+| `other_profile`   | with `other`: `<target>/<subtarget>/<profile>`, e.g. `ipq40xx/generic/glinet_gl-b1300` |
+| `packages`        | extra packages; a name adds it, `-name` removes it (`-dnsmasq dnsmasq-full`) |
+| `package`         | optional: a package of this repository to build and include (`netbird`); empty: none |
+| `pr_number`       | optional: a pull request of `openwrt/packages` (see below)                  |
+| `feed_repository`, `feed_ref` | advanced: a branch of a fork, e.g. `wehagy/packages` `my-branch`; not with `pr_number` |
+
+Example: a GL.iNet MT1300 image of `25.12` with netbird, replacing dnsmasq by
+dnsmasq-full: `line` `25.12`, `profile` `ramips/mt7621/glinet_gl-mt1300`,
+`packages` `-dnsmasq dnsmasq-full`, `package` `netbird`. A device that is not
+in the list: `profile` `other`, `other_profile` `ipq40xx/generic/glinet_gl-b1300`.
+
+- The extra packages of `images.packages` in the `config.yml` of `package` are
+  always included, then yours; remove one of them with `-name`. Without
+  `package` only yours are added.
+- The profile is looked up in the official `profiles.json` of the line first:
+  a target or profile that does not exist fails within about a minute, before
+  any build, with the nearest names. A package, `pr_number` or `feed_*` that
+  does not make sense together fails in the first job with a message that says
+  what to change.
+- A profile whose architecture has no SDK image yet gets one on first use (the
+  base builds and pushes it; this repository needs write access to the package
+  `ghcr.io/wehagy/openwrt-sdk`, see "SDK image access").
+- The summary compares each image with the size limit of the device only when
+  `images.limits` of `config.yml` has it (the two 32 MB devices); otherwise it
+  says the limit is unknown (the Image Builder prints it only when an image
+  does not fit, and then the image job fails with the numbers).
+
+**Pull request of `openwrt/packages` (`pr_number`).** The line you choose is
+independent of the pull request; `package` must be one of the packages it
+changes. The jobs `source` and `compose` reuse `scripts/upstream-pr/`
+(`resolve.sh`, `compose.sh`, `cleanup.sh`, the same as `upstream-pr.yml`):
+
+- the base branch of the pull request belongs to the chosen line (`master`:
+  `main`, `openwrt-25.12`: `25.12`): its head commit is built as it is, from
+  `openwrt/packages`;
+- otherwise (e.g. a pull request to `master` and line `25.12`): its changed
+  package directories are copied over the branch of the chosen line, pushed to
+  a temporary branch `upstream-overlay/custom-pr<n>-<run id>-<attempt>` of this
+  repository, built from there, and the branch is deleted when the build is
+  done.
+
+The summary states the repository, ref and commit that were built and whether
+an overlay was used. No secret reaches an upstream pull request, and nothing is
+written to `openwrt/packages`. `feed_repository` and `feed_ref` build a branch
+of another repository instead (`pr_number` and these two are mutually
+exclusive).
+
+The profile list of the form is the list of `config.yml` (a new profile needs
+both; `scripts/images/selftest.sh` fails if they differ). Devices with 32 MB of
+flash, `glinet_gl-mt1300` and `buffalo_wzr-hp-g450h`, show whether the package
+fits; their limits are the `IMAGE_SIZE` of the device in `openwrt/openwrt`, tag
+`v25.12.6`:
+
+| Profile                | `IMAGE_SIZE`                                    | Flash layout                                                                                                                                       |
+|------------------------|-------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `glinet_gl-mt1300`     | `32448k` (`ramips/image/mt7621.mk:1563`)        | one SPI NOR; partitions `u-boot` ... `firmware` `0x50000` + `0x1fb0000` = `0x2000000` (`ramips/dts/mt7621_glinet_gl-mt1300.dts:121`)             |
+| `buffalo_wzr-hp-g450h` | `32256k` (`ath79/image/generic.mk:729`)         | two SPI NOR chips concatenated (`ath79/dts/ar7242_buffalo_wzr-bhr.dtsi:61-63`); `firmware` `0x60000` + `0x1f80000` (`...wzr-bhr.dtsi:89-90`)      |
+
+`tplink_archer-c7-v4` and `totolink_x5000r` (16 MB flash) are declared
+`:too-big` in `config.yml`: their job is green only when the Image Builder
+proves, with numbers, that the image does not fit.
 
 ## Secrets
 
@@ -205,7 +299,9 @@ Package settings > Manage Actions access > Add Repository >
 ## Adding a package
 
 1. Create `packages/<name>/config.yml` with `package: <name>` (a directory of
-   `openwrt/packages`).
+   `openwrt/packages`) and, to have images, an `images` block (see
+   `packages/netbird/config.yml`, which documents every key). Add `memory` or
+   `targets` only if the package needs something other than the base defaults.
 2. Add the jobs of `ci.yml` for it (the `config` job reads one package today).
 3. Optional: put pytest files in `packages/<name>/tests/` and pass
    `tests_path: packages/<name>/tests`. They may import `harness_util` and use
