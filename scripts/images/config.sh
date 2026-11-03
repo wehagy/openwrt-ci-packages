@@ -1,14 +1,17 @@
 #!/usr/bin/env sh
 # Responsibility: read packages/<name>/config.yml of this repository and print
 # what the workflows pass to the reusable base wehagy/openwrt-ci as KEY=value
-# lines (package, profiles, packages, targets, memory, apk_timeout, limits). Nothing is
+# lines (package, profiles, packages, targets, memory, apk_timeout,
+# services_disabled, limits). Nothing is
 # printed unless the file and every value in it are well formed, so the output
 # is safe for $GITHUB_OUTPUT. The base validates the same values again with
 # its own rules; this check keeps a typo from reaching a run.
 #
 # profiles, packages and targets are single lines of space separated words;
-# `memory`, `apk_timeout` and `targets` are empty when the config does not set
-# them (the base defaults then apply). `limits` is "<profile> <bytes>" pairs separated by
+# `memory`, `apk_timeout`, `targets` and `services_disabled` are empty when the
+# config does not set them (the base defaults then apply; `services_disabled`
+# lists the init scripts of the package that are disabled by default, which the
+# service test of the base skips). `limits` is "<profile> <bytes>" pairs separated by
 # spaces.
 #
 # Usage:
@@ -51,6 +54,7 @@ packages=$(value '.images.packages')
 targets=$(value .targets)
 memory=$(value .memory)
 apk_timeout=$(value .apk_timeout)
+services_disabled=$(value '.services_disabled // [] | join(" ")')
 limits=$(value '.images.limits // {} | to_entries | map(.key + " " + (.value | tostring)) | join(" ")')
 
 # One line of the allowed characters each: nothing can start a new output
@@ -67,6 +71,10 @@ case "${memory}" in
 *[!0-9M]*) die "${config}: memory must be NNNM, e.g. 256M" ;;
 *) ;;
 esac
+case "${services_disabled}" in
+*[!A-Za-z0-9._\ -]*) die "${config}: services_disabled has a character outside [A-Za-z0-9._ -]" ;;
+*) ;;
+esac
 case "${apk_timeout}" in
 *[!0-9]*) die "${config}: apk_timeout must be whole seconds, e.g. 120" ;;
 *) ;;
@@ -78,4 +86,5 @@ printf 'packages=%s\n' "${packages}"
 printf 'targets=%s\n' "${targets}"
 printf 'memory=%s\n' "${memory}"
 printf 'apk_timeout=%s\n' "${apk_timeout}"
+printf 'services_disabled=%s\n' "${services_disabled}"
 printf 'limits=%s\n' "${limits}"

@@ -11,8 +11,9 @@ package test.
 - `packages/<name>/config.yml`: data of the package, read by
   `scripts/images/config.sh`: `package` (a directory of `openwrt/packages`),
   `images` (extra `packages`, `profiles`, optional `limits`) and, only when the
-  package needs something other than the base defaults, `memory`, `targets` and
-  `apk_timeout` of the QEMU tests. The file documents every key.
+  package needs something other than the base defaults, `memory`, `targets`,
+  `apk_timeout` and `services_disabled` of the QEMU tests. The file documents
+  every key.
 - `packages/<name>/tests/` (optional): pytest files that run next to the
   generic test in the QEMU VM. Missing directory: only the generic test runs.
   For `netbird` they are the runtime tests described in "NetBird runtime
@@ -48,13 +49,16 @@ package test.
   `ci_ref` differ).
 - What `config.yml` gives the calls: `build.yml` gets `profiles` (its default
   `archs` are the architectures of the QEMU targets plus those of the
-  profiles) and `targets`; `test.yml` gets `targets`, `memory` and `apk_timeout`; `images.yml`
+  profiles) and `targets`; `test.yml` gets `targets`, `memory`, `apk_timeout` and
+  `services_disabled`; `images.yml`
   gets `profiles` and `packages`. The base defaults apply to what the file
   omits: all four QEMU targets and 128M of VM memory (netbird sets `memory:
   256M`, because it was OOM-killed at 128M on x86-64, run 41480369349; and
   `apk_timeout: 120`, because `apk info -L` exceeded 30 s once on x86-64, run
   41437522326). Without `apk_timeout` the base uses labgrid's default, no
-  timeout.
+  timeout. `services_disabled: [name, ...]` lists init scripts that the package
+  leaves disabled by default: the service test skips them with a logged reason;
+  every other script needs a running, stable instance (netbird lists none).
 - The job logs print `harness: wehagy/openwrt-ci ref <ref> -> <sha>` and
   `caller: wehagy/openwrt-ci-packages run commit <sha>, checkout HEAD <sha>`.
 

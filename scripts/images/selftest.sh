@@ -97,6 +97,7 @@ cat >"${fx}/netbird/config.yml" <<'EOF'
 package: netbird
 memory: 256M
 apk_timeout: 120
+services_disabled: [socat, ssh-agent]
 images:
   packages: luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut
   profiles:
@@ -111,6 +112,7 @@ expect_line "config: package" "package=netbird" "${cfg}" netbird
 expect_line "config: extra packages" "packages=luci-app-attendedsysupgrade luci-app-uhttpd luci-ssl owut" "${cfg}" netbird
 expect_line "config: memory override" "memory=256M" "${cfg}" netbird
 expect_line "config: apk timeout" "apk_timeout=120" "${cfg}" netbird
+expect_line "config: services disabled by default" "services_disabled=socat ssh-agent" "${cfg}" netbird
 expect_line "config: no targets means the base default" "targets=" "${cfg}" netbird
 expect_line "config: limits" "limits=ramips/mt7621/glinet_gl-mt1300 33226752" "${cfg}" netbird
 expect_line "config: profiles keep :too-big" "profiles=x86/64/generic ath79/generic/tplink_archer-c7-v4:too-big ramips/mt7621/glinet_gl-mt1300" "${cfg}" netbird
@@ -125,12 +127,16 @@ printf 'package: other\n' >"${PACKAGES_DIR}/b/config.yml"
 printf 'package: c\nimages:\n  profiles:\n    - "x86/64/generic;id"\n' >"${PACKAGES_DIR}/c/config.yml"
 printf 'package: d\nmemory: 2G\n' >"${PACKAGES_DIR}/d/config.yml"
 printf 'package: f\napk_timeout: 2m\n' >"${PACKAGES_DIR}/f/config.yml"
+mkdir -p "${PACKAGES_DIR}/g"
+printf 'package: g\nservices_disabled: ["a/b"]\n' >"${PACKAGES_DIR}/g/config.yml"
 printf 'package: e\ntargets: "x86-64\\n::error::x"\n' >"${PACKAGES_DIR}/e/config.yml"
 expect_line "config: a package with no images or overrides: empty profiles" "profiles=" "${cfg}" a
 expect_line "config: a package with no overrides: empty memory" "memory=" "${cfg}" a
 expect_refused "config: package key differs from the directory" "package is not b" "${cfg}" b
 expect_refused "config: character outside the allowed set in profiles" "profiles has a character" "${cfg}" c
 expect_line "config: no apk_timeout means the labgrid default" "apk_timeout=" "${cfg}" a
+expect_line "config: no services_disabled means none" "services_disabled=" "${cfg}" a
+expect_refused "config: service name with a slash" "services_disabled has a character" "${cfg}" g
 expect_refused "config: invalid apk_timeout" "apk_timeout must be whole seconds" "${cfg}" f
 expect_refused "config: invalid memory" "memory must be NNNM" "${cfg}" d
 expect_refused "config: newline in a value cannot forge a command" "targets has a character" "${cfg}" e

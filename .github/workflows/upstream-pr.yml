@@ -137,6 +137,7 @@ jobs:
       targets: ${{ matrix.targets }}
       memory: ${{ matrix.memory }}
       apk_timeout: ${{ matrix.apk_timeout }}
+      services_disabled: ${{ matrix.services_disabled }}
 
   image-pr:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}
@@ -190,6 +191,7 @@ jobs:
       targets: ${{ matrix.targets }}
       memory: ${{ matrix.memory }}
       apk_timeout: ${{ matrix.apk_timeout }}
+      services_disabled: ${{ matrix.services_disabled }}
 
   image-other:
     if: ${{ needs.resolve.outputs.has_full == 'true' }}

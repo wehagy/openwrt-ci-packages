@@ -139,6 +139,7 @@ while read -r dir; do
 	targets=
 	memory=
 	apk_timeout=
+	services_disabled=
 	image_packages=
 	if [ "${is_local}" = true ]; then
 		cfg=$("${here}/../images/config.sh" "${name}") || exit 1
@@ -146,10 +147,11 @@ while read -r dir; do
 		targets=$(printf '%s\n' "${cfg}" | sed -n -e 's/^targets=//p')
 		memory=$(printf '%s\n' "${cfg}" | sed -n -e 's/^memory=//p')
 		apk_timeout=$(printf '%s\n' "${cfg}" | sed -n -e 's/^apk_timeout=//p')
+		services_disabled=$(printf '%s\n' "${cfg}" | sed -n -e 's/^services_disabled=//p')
 		image_packages=$(printf '%s\n' "${cfg}" | sed -n -e 's/^packages=//p')
 	fi
-	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" \
-		"${profiles}" "${targets}" "${memory}" "${image_packages}" "${apk_timeout}" >>"${work}/rows.tsv"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "${name}" "${dir}" "${is_local}" \
+		"${profiles}" "${targets}" "${memory}" "${image_packages}" "${apk_timeout}" "${services_disabled}" >>"${work}/rows.tsv"
 done <"${work}/pkgdirs.txt"
 if [ ! -s "${work}/rows.tsv" ]; then
 	while read -r line_skipped; do
@@ -169,7 +171,7 @@ rows_json=$(jq -R -s -c '
 	split("\n") | map(select(length > 0) | split("\t")
 	| {package: .[0], dir: .[1], local: (.[2] == "true"),
 	   tests_path: (if .[2] == "true" then "packages/" + .[0] + "/tests" else "" end),
-	   profiles: .[3], targets: .[4], memory: .[5], image_packages: .[6], apk_timeout: .[7]})' "${work}/rows.tsv")
+	   profiles: .[3], targets: .[4], memory: .[5], image_packages: .[6], apk_timeout: .[7], services_disabled: .[8]})' "${work}/rows.tsv")
 matrix_all=$(printf '%s' "${rows_json}" | jq -c '{include: .}')
 matrix_full=$(printf '%s' "${rows_json}" | jq -c '{include: map(select(.local))}')
 has_full=$(printf '%s' "${rows_json}" | jq -r 'any(.[]; .local)')
