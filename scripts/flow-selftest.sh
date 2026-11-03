@@ -526,16 +526,23 @@ check "fork base: behind: exits 0" "${work}/fork.err" same "${fork_rc}" 0
 check "fork base: behind: names the base commit" "${work}/fork.out" has "${work}/fork.out" "base commit \`${merge_sha}\`, 7 commit(s) behind openwrt/packages master (\`${master_sha}\`)"
 check "fork base: behind: says the pull request holds the bump only" "${work}/fork.out" has "${work}/fork.out" "holds only the bump"
 
-# A fork with commits of its own (ahead or diverged): refused, nothing printed
-# for the description.
-for status in ahead diverged; do
+# A fork with commits of its own: refused, nothing printed for the description.
+# Ahead only (the common case) and diverged are separate cases.
+#
+# Arguments:
+#   $1  status
+#   $2  ahead_by
+#   $3  behind_by
+fork_refused() {
 	gh_fixtures v0.82.0
-	fork_fixture "${status}" 2 3
+	fork_fixture "$1" "$2" "$3"
 	run_fork_base wehagy/packages true
-	check "fork base: ${status}: fails" "${work}/fork.err" failed "${fork_rc}"
-	check "fork base: ${status}: says the commits would travel" "${work}/fork.err" has "${work}/fork.err" "2 commit(s) that openwrt/packages master does not have"
-	check "fork base: ${status}: prints no output line" "${work}/fork.out" empty "${work}/fork.out"
-done
+	check "fork base: $1 (ahead $2, behind $3): fails" "${work}/fork.err" failed "${fork_rc}"
+	check "fork base: $1 (ahead $2, behind $3): says the commits would travel" "${work}/fork.err" has "${work}/fork.err" "$2 commit(s) that openwrt/packages master does not have"
+	check "fork base: $1 (ahead $2, behind $3): prints no output line" "${work}/fork.out" empty "${work}/fork.out"
+}
+fork_refused ahead 2 0
+fork_refused diverged 2 3
 
 # Answers that cannot be read, a failing call and a bad flag all fail.
 gh_fixtures v0.82.0
