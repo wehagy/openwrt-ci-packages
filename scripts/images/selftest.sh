@@ -368,6 +368,13 @@ image_case() {
 		report "workflow: image job $1" "got '${ic_got}', expected '$2' (expression: ${ic_expr})"
 	fi
 }
+# image_case turns `!cancelled()` into true to evaluate the expression, so
+# dropping it from the `if:` would pass every case. It is asserted on the text.
+if yq -r '.jobs.image.if' "${wf}" | grep -qF '!cancelled()'; then
+	report "workflow: image job if: keeps !cancelled()" ok
+else
+	report "workflow: image job if: keeps !cancelled()" "the if: of the image job does not contain !cancelled()"
+fi
 image_case "runs after a successful build" run success netbird success
 image_case "does not run when source or compose failed (build skipped, package asked)" skip success netbird skipped
 image_case "does not run after a failed build" skip success netbird failure
